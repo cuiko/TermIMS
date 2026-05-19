@@ -34,9 +34,9 @@ dist: build
 	@mkdir -p $(BUILD_DIR)/dist
 	@cp -a $(BUNDLE) $(BUILD_DIR)/dist/
 	@ln -s /Applications $(BUILD_DIR)/dist/Applications
-	@cd $(BUILD_DIR)/dist && zip -ryq ../../$(APP_NAME).zip .
+	@hdiutil create -volname $(APP_NAME) -srcfolder $(BUILD_DIR)/dist -ov -format UDZO $(APP_NAME).dmg -quiet
 	@rm -rf $(BUILD_DIR)/dist
-	@echo "Packaged → $(APP_NAME).zip"
+	@echo "Packaged → $(APP_NAME).dmg"
 
 clean:
 	rm -rf $(BUILD_DIR)

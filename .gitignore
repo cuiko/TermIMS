@@ -1,6 +1,7 @@
 build/
 TermIMS.app/
 TermIMS.zip
+TermIMS.dmg
 .DS_Store
 *.o
 *.swp
