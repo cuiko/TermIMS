@@ -2,7 +2,7 @@
 
 A lightweight macOS menu bar app that automatically switches input methods based on the active application — and for terminal apps, based on the running process or tab title.
 
-Inspired by [KeyboardHolder](https://github.com/nicklama/keyboardholder).
+Inspired by [KeyboardHolder](https://github.com/leaves615/KeyboardHolder).
 
 ## Features
 
