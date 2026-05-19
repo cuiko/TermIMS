@@ -5,6 +5,7 @@ BIN        := $(BUNDLE)/Contents/MacOS/$(APP_NAME)
 INSTALL_DIR := /Applications/$(APP_NAME).app
 SRC        := TermIMS.swift
 PLIST      := Info.plist
+DIST_DIR   := dist
 FRAMEWORKS := -framework Cocoa -framework Carbon
 
 .PHONY: build install clean restart dist
@@ -20,7 +21,7 @@ $(BIN): $(SRC) $(PLIST) AppIcon.icns
 	@echo "Built → $(BUNDLE)"
 
 install: build
-	@pkill -x $(APP_NAME) 2>/dev/null; sleep 0.5; true
+	@pkill -x $(APP_NAME) 2>/dev/null && sleep 0.3 || true
 	@rm -rf $(INSTALL_DIR)
 	@cp -a $(BUNDLE) $(INSTALL_DIR)
 	@echo "Installed → $(INSTALL_DIR)"
@@ -30,13 +31,13 @@ restart: install
 	@echo "Restarted"
 
 dist: build
-	@rm -rf $(BUILD_DIR)/dmg-staging dist
-	@mkdir -p $(BUILD_DIR)/dmg-staging dist
+	@rm -rf $(BUILD_DIR)/dmg-staging $(DIST_DIR)
+	@mkdir -p $(BUILD_DIR)/dmg-staging $(DIST_DIR)
 	@cp -a $(BUNDLE) $(BUILD_DIR)/dmg-staging/
 	@ln -s /Applications $(BUILD_DIR)/dmg-staging/Applications
-	@hdiutil create -volname $(APP_NAME) -srcfolder $(BUILD_DIR)/dmg-staging -ov -format UDZO dist/$(APP_NAME).dmg -quiet
+	@hdiutil create -volname $(APP_NAME) -srcfolder $(BUILD_DIR)/dmg-staging -ov -format UDZO $(DIST_DIR)/$(APP_NAME).dmg -quiet
 	@rm -rf $(BUILD_DIR)/dmg-staging
-	@echo "Packaged → dist/$(APP_NAME).dmg"
+	@echo "Packaged → $(DIST_DIR)/$(APP_NAME).dmg"
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) $(DIST_DIR)
