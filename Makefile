@@ -30,13 +30,13 @@ restart: install
 	@echo "Restarted"
 
 dist: build
-	@rm -rf $(BUILD_DIR)/dist
-	@mkdir -p $(BUILD_DIR)/dist
-	@cp -a $(BUNDLE) $(BUILD_DIR)/dist/
-	@ln -s /Applications $(BUILD_DIR)/dist/Applications
-	@hdiutil create -volname $(APP_NAME) -srcfolder $(BUILD_DIR)/dist -ov -format UDZO $(APP_NAME).dmg -quiet
-	@rm -rf $(BUILD_DIR)/dist
-	@echo "Packaged → $(APP_NAME).dmg"
+	@rm -rf $(BUILD_DIR)/dmg-staging dist
+	@mkdir -p $(BUILD_DIR)/dmg-staging dist
+	@cp -a $(BUNDLE) $(BUILD_DIR)/dmg-staging/
+	@ln -s /Applications $(BUILD_DIR)/dmg-staging/Applications
+	@hdiutil create -volname $(APP_NAME) -srcfolder $(BUILD_DIR)/dmg-staging -ov -format UDZO dist/$(APP_NAME).dmg -quiet
+	@rm -rf $(BUILD_DIR)/dmg-staging
+	@echo "Packaged → dist/$(APP_NAME).dmg"
 
 clean:
 	rm -rf $(BUILD_DIR)

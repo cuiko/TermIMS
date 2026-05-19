@@ -1,7 +1,6 @@
 build/
-TermIMS.app/
-TermIMS.zip
-TermIMS.dmg
+dist/
 .DS_Store
 *.o
 *.swp
+CLAUDE.md

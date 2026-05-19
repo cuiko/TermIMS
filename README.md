@@ -1,8 +1,8 @@
-# TermIMS
+<h1 align="center">TermIMS</h1>
 
-A lightweight macOS menu bar app that automatically switches input methods based on the active application — and for terminal apps, based on the running process or tab title.
+<p align="center"><img src="icon.png" width="128"></p>
 
-Inspired by [KeyboardHolder](https://github.com/leaves615/KeyboardHolder).
+<p align="center">A lightweight macOS menu bar app that automatically switches input methods based on the active application — and for terminal apps, based on the running process or tab title.</p>
 
 ## Features
 
@@ -30,7 +30,7 @@ TermIMS uses the macOS Accessibility API to monitor application focus changes an
 
 ### Download
 
-Download `TermIMS.zip` from the [Releases](https://github.com/cuiko/TermIMS/releases) page, unzip, and drag `TermIMS.app` into the `Applications` folder.
+Download `TermIMS.dmg` from the [Releases](https://github.com/cuiko/TermIMS/releases) page, open it, and drag `TermIMS.app` into the `Applications` folder.
 
 ### Build from source
 
@@ -49,7 +49,7 @@ make install
 # Build, install, and launch
 make restart
 
-# Package as zip for distribution
+# Package as DMG for distribution
 make dist
 ```
 
@@ -71,6 +71,10 @@ make dist
 | Tab Title    | `ssh`    | ABC          |
 
 When you switch to a Ghostty tab running `claude`, TermIMS detects the foreground process and switches to Chinese. Switch to a plain shell tab and it reverts to the terminal default.
+
+---
+
+Inspired by [KeyboardHolder](https://github.com/leaves615/KeyboardHolder).
 
 ## License
 
