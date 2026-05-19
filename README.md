@@ -2,6 +2,8 @@
 
 A lightweight macOS menu bar app that automatically switches input methods based on the active application — and for terminal apps, based on the running process or tab title.
 
+Inspired by [KeyboardHolder](https://github.com/nicklama/keyboardholder).
+
 ## Features
 
 - **Per-app input method rules** — Assign a specific input method to any application. When you switch to that app, the input method changes automatically.
@@ -24,24 +26,36 @@ TermIMS uses the macOS Accessibility API to monitor application focus changes an
 - macOS 13.0+
 - Accessibility permission (System Settings → Privacy & Security → Accessibility)
 
-## Build
+## Install
+
+### Download
+
+Download `TermIMS.zip` from the [Releases](https://github.com/cuiko/TermIMS/releases) page, unzip, and drag `TermIMS.app` into the `Applications` folder.
+
+### Build from source
 
 The project is a single Swift file compiled directly with `swiftc`. No Xcode project needed.
 
 ```sh
+git clone https://github.com/cuiko/TermIMS.git
+cd TermIMS
+
+# Build locally
+make build
+
 # Build and install to /Applications
 make install
 
 # Build, install, and launch
 make restart
 
-# Remove
-make clean
+# Package as zip for distribution
+make dist
 ```
 
 ## Usage
 
-1. Run `make restart` to build and launch.
+1. Launch TermIMS (or run `make restart`).
 2. Grant Accessibility permission when prompted.
 3. Click the keyboard icon in the menu bar → **Settings**.
 4. **General** tab — Set the global default input method, indicator preferences.
@@ -50,11 +64,11 @@ make clean
 
 ### Terminal Rules Example
 
-| Match       | Pattern    | Input Method |
-|-------------|------------|--------------|
-| Process Name | `claude`  | Chinese      |
-| Process Name | `nvim`    | ABC          |
-| Tab Title    | `ssh`     | ABC          |
+| Match        | Pattern  | Input Method |
+|--------------|----------|--------------|
+| Process Name | `claude` | Chinese      |
+| Process Name | `nvim`   | ABC          |
+| Tab Title    | `ssh`    | ABC          |
 
 When you switch to a Ghostty tab running `claude`, TermIMS detects the foreground process and switches to Chinese. Switch to a plain shell tab and it reverts to the terminal default.
 
