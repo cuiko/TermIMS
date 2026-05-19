@@ -60,8 +60,8 @@ struct Rule: Codable {
 }
 
 enum TerminalMatchType: String, Codable, CaseIterable {
-    case title   = "Tab Title"
     case process = "Process Name"
+    case title   = "Tab Title"
 }
 
 struct TerminalRule: Codable {
