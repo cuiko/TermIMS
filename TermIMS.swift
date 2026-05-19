@@ -59,9 +59,15 @@ struct Rule: Codable {
     var inputSourceName: String
 }
 
-struct DomainRule: Codable {
+enum TerminalMatchType: String, Codable, CaseIterable {
+    case title   = "Tab Title"
+    case process = "Process Name"
+}
+
+struct TerminalRule: Codable {
     var enabled: Bool = true
-    var domainPattern: String
+    var matchType: TerminalMatchType = .title
+    var pattern: String = ""
     var inputSourceID: String
     var inputSourceName: String
 }
@@ -75,19 +81,20 @@ enum IndicatorPosition: String, Codable, CaseIterable {
     case bottomRight   = "Bottom Right"
 }
 
+let terminalBundleIDs: Set<String> = [
+    "com.mitchellh.ghostty",
+    "com.apple.Terminal",
+    "com.googlecode.iterm2",
+    "net.kovidgoyal.kitty",
+    "com.github.wez.wezterm",
+    "dev.warp.Warp-Stable",
+    "org.alacritty",
+]
+
 extension Notification.Name {
     static let rulesDidChange = Notification.Name("RulesDidChange")
     static let imDidSwitch    = Notification.Name("IMDidSwitch")
 }
-
-let browserIDs: Set<String> = [
-    "com.google.Chrome", "com.google.Chrome.beta", "com.google.Chrome.canary",
-    "com.apple.Safari", "com.apple.SafariTechnologyPreview",
-    "com.mozilla.firefox", "org.mozilla.firefox",
-    "company.thebrowser.Browser",
-    "com.microsoft.edgemac", "com.microsoft.edgemac.Beta",
-    "com.brave.Browser", "com.operasoftware.Opera", "com.vivaldi.Vivaldi",
-]
 
 // MARK: - Rule Store
 
@@ -100,13 +107,8 @@ class RuleStore {
     }
 
     var rules: [Rule] {
-        get { decode("IMSwitchRules") ?? [] }
-        set { encode(newValue, "IMSwitchRules"); notify() }
-    }
-
-    var domainRules: [DomainRule] {
-        get { decode("IMSwitchDomainRules") ?? [] }
-        set { encode(newValue, "IMSwitchDomainRules"); notify() }
+        get { decode("TermIMSRules") ?? [] }
+        set { encode(newValue, "TermIMSRules"); notify() }
     }
 
     var defaultSourceID: String? {
@@ -116,15 +118,6 @@ class RuleStore {
     var defaultSourceName: String? {
         get { ud.string(forKey: "DefaultSourceName") }
         set { ud.set(newValue, forKey: "DefaultSourceName") }
-    }
-
-    var addressBarSourceID: String? {
-        get { ud.string(forKey: "AddressBarSourceID") }
-        set { ud.set(newValue, forKey: "AddressBarSourceID"); notify() }
-    }
-    var addressBarSourceName: String? {
-        get { ud.string(forKey: "AddressBarSourceName") }
-        set { ud.set(newValue, forKey: "AddressBarSourceName") }
     }
 
     var indicatorEnabled: Bool {
@@ -141,6 +134,20 @@ class RuleStore {
         set { ud.set(newValue, forKey: "HideMenuBarIcon"); notify() }
     }
 
+    var terminalRules: [TerminalRule] {
+        get { decode("TermIMSTerminalRules") ?? [] }
+        set { encode(newValue, "TermIMSTerminalRules"); notify() }
+    }
+
+    var terminalDefaultSourceID: String? {
+        get { ud.string(forKey: "TerminalDefaultSourceID") }
+        set { ud.set(newValue, forKey: "TerminalDefaultSourceID"); notify() }
+    }
+    var terminalDefaultSourceName: String? {
+        get { ud.string(forKey: "TerminalDefaultSourceName") }
+        set { ud.set(newValue, forKey: "TerminalDefaultSourceName") }
+    }
+
     private func decode<T: Decodable>(_ key: String) -> T? {
         guard let data = ud.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(T.self, from: data)
@@ -148,80 +155,6 @@ class RuleStore {
     private func encode<T: Encodable>(_ val: T, _ key: String) {
         ud.set(try? JSONEncoder().encode(val), forKey: key)
     }
-}
-
-// MARK: - Browser Helpers
-
-func extractBrowserURL(_ appEl: AXUIElement) -> String? {
-    var winRef: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(appEl, kAXFocusedWindowAttribute as CFString, &winRef) == .success else { return nil }
-    let win = winRef as! AXUIElement
-
-    var docRef: CFTypeRef?
-    if AXUIElementCopyAttributeValue(win, "AXDocument" as CFString, &docRef) == .success,
-       let url = docRef as? String, !url.isEmpty { return url }
-
-    if let bar = findAddressBar(win, depth: 0) {
-        var valRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(bar, kAXValueAttribute as CFString, &valRef) == .success,
-           let url = valRef as? String, !url.isEmpty { return url }
-    }
-    return nil
-}
-
-func findAddressBar(_ el: AXUIElement, depth: Int) -> AXUIElement? {
-    guard depth < 6 else { return nil }
-    var role: CFTypeRef?
-    AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
-    let r = role as? String ?? ""
-    if r == "AXWebArea" { return nil }
-    if r == "AXTextField" || r == "AXSearchField" || r == "AXComboBox" {
-        var desc: CFTypeRef?
-        AXUIElementCopyAttributeValue(el, kAXDescriptionAttribute as CFString, &desc)
-        let d = (desc as? String ?? "").lowercased()
-        if d.contains("address") || d.contains("url") || d.contains("location") || d.contains("search") {
-            return el
-        }
-    }
-    var children: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &children) == .success,
-          let kids = children as? [AXUIElement] else { return nil }
-    for kid in kids {
-        if let found = findAddressBar(kid, depth: depth + 1) { return found }
-    }
-    return nil
-}
-
-func isAddressBarFocused(_ appEl: AXUIElement) -> Bool {
-    var ref: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(appEl, kAXFocusedUIElementAttribute as CFString, &ref) == .success else { return false }
-    let el = ref as! AXUIElement
-    var role: CFTypeRef?
-    AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &role)
-    let r = role as? String ?? ""
-    guard r == "AXTextField" || r == "AXSearchField" || r == "AXComboBox" else { return false }
-    var parent = el as CFTypeRef
-    for _ in 0..<10 {
-        var p: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(parent as! AXUIElement, kAXParentAttribute as CFString, &p) == .success else { break }
-        var pRole: CFTypeRef?
-        AXUIElementCopyAttributeValue(p as! AXUIElement, kAXRoleAttribute as CFString, &pRole)
-        if (pRole as? String) == "AXWebArea" { return false }
-        parent = p!
-    }
-    return true
-}
-
-func matchDomain(url: String, pattern: String) -> Bool {
-    let normalized = url.hasPrefix("http") ? url : "https://\(url)"
-    guard let host = URL(string: normalized)?.host else { return false }
-    let p = pattern.lowercased()
-    let h = host.lowercased()
-    if p.hasPrefix("*.") {
-        let suffix = String(p.dropFirst(2))
-        return h == suffix || h.hasSuffix(".\(suffix)")
-    }
-    return h == p || h.hasSuffix(".\(p)")
 }
 
 // MARK: - Indicator
@@ -241,11 +174,10 @@ class IndicatorPanel: NSPanel {
         hasShadow = true
         collectionBehavior = [.canJoinAllSpaces, .transient]
 
-        let bg = NSVisualEffectView(frame: contentView!.bounds)
+        let bg = NSView(frame: contentView!.bounds)
         bg.autoresizingMask = [.width, .height]
-        bg.material = .hudWindow
-        bg.state = .active
         bg.wantsLayer = true
+        bg.layer?.backgroundColor = NSColor(white: 0.15, alpha: 0.9).cgColor
         bg.layer?.cornerRadius = 10
         bg.layer?.masksToBounds = true
         contentView?.addSubview(bg)
@@ -271,21 +203,22 @@ class IndicatorPanel: NSPanel {
         setContentSize(NSSize(width: w, height: h))
 
         guard let s = NSScreen.main else { return }
-        let margin: CGFloat = 40
+        let mx: CGFloat = 60
+        let my: CGFloat = 60
         let pt: NSPoint
         switch position {
         case .screenCenter:
             pt = NSPoint(x: s.frame.midX - w / 2, y: s.frame.midY - h / 2)
         case .centerBottom:
-            pt = NSPoint(x: s.frame.midX - w / 2, y: s.frame.minY + margin)
+            pt = NSPoint(x: s.frame.midX - w / 2, y: s.frame.minY + my)
         case .topLeft:
-            pt = NSPoint(x: s.frame.minX + margin, y: s.frame.maxY - h - margin)
+            pt = NSPoint(x: s.frame.minX + mx, y: s.frame.maxY - h - my)
         case .topRight:
-            pt = NSPoint(x: s.frame.maxX - w - margin, y: s.frame.maxY - h - margin)
+            pt = NSPoint(x: s.frame.maxX - w - mx, y: s.frame.maxY - h - my)
         case .bottomLeft:
-            pt = NSPoint(x: s.frame.minX + margin, y: s.frame.minY + margin)
+            pt = NSPoint(x: s.frame.minX + mx, y: s.frame.minY + my)
         case .bottomRight:
-            pt = NSPoint(x: s.frame.maxX - w - margin, y: s.frame.minY + margin)
+            pt = NSPoint(x: s.frame.maxX - w - mx, y: s.frame.minY + my)
         }
         setFrameOrigin(pt)
         alphaValue = 1
@@ -314,7 +247,7 @@ class FocusMonitor {
     private var observers: [String: AXObserver] = [:]
     private var elements:  [String: AXUIElement] = [:]
     private var contexts:  [String: AXContext] = [:]
-    private var titleDebounce: Timer?
+    private var termDebounce: Timer?
 
     func start() {
         let nc = NSWorkspace.shared.notificationCenter
@@ -332,78 +265,251 @@ class FocusMonitor {
     func stop() {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         NotificationCenter.default.removeObserver(self)
+        termDebounce?.invalidate()
         for bid in Array(observers.keys) { detach(bid) }
     }
 
     @objc func reload() {
-        let appIDs  = Set(RuleStore.shared.rules.filter(\.enabled).map(\.appBundleID))
-        let needAX  = appIDs.union(browserIDs)
-        for bid in observers.keys where !needAX.contains(bid) { detach(bid) }
-        for bid in needAX where observers[bid] == nil { attach(bid) }
+        let store = RuleStore.shared
+        var needed = Set(store.rules.filter(\.enabled).map(\.appBundleID))
+        if store.terminalRules.contains(where: \.enabled) {
+            needed.formUnion(terminalBundleIDs)
+        }
+        for bid in observers.keys where !needed.contains(bid) { detach(bid) }
+        for bid in needed where observers[bid] == nil { attach(bid) }
     }
 
-    func resolveInputSource(for bid: String) -> String? {
+    private func isTerminalWithRules(_ bid: String) -> Bool {
+        terminalBundleIDs.contains(bid) && RuleStore.shared.terminalRules.contains(where: \.enabled)
+    }
+
+    private func resolveInputSource(for bid: String) -> String? {
         let store = RuleStore.shared
+        if isTerminalWithRules(bid) {
+            if let matched = matchTerminalRule(bid: bid, store: store) {
+                return matched
+            }
+            if let termDefault = store.terminalDefaultSourceID {
+                return termDefault
+            }
+        }
         if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
             return rule.inputSourceID
         }
         return store.defaultSourceID
     }
 
-    func handleWindowFocus(_ bid: String) {
-        guard enabled else { return }
-        if browserIDs.contains(bid) {
-            applyBrowserRules(bid)
-        } else if let id = resolveInputSource(for: bid) {
-            selectInputSource(id)
-        }
-    }
+    private func matchTerminalRule(bid: String, store: RuleStore) -> String? {
+        let rules = store.terminalRules.filter(\.enabled)
+        guard !rules.isEmpty else { return nil }
 
-    func handleElementFocus(_ bid: String) {
-        guard enabled, browserIDs.contains(bid), let el = elements[bid] else { return }
-        let store = RuleStore.shared
-        if isAddressBarFocused(el), let abID = store.addressBarSourceID {
-            selectInputSource(abID)
-        } else {
-            applyBrowserRules(bid)
-        }
-    }
+        let titleRules = rules.filter { $0.matchType == .title }
+        let processRules = rules.filter { $0.matchType == .process }
 
-    func handleTitleChange(_ bid: String) {
-        guard enabled, browserIDs.contains(bid) else { return }
-        titleDebounce?.invalidate()
-        titleDebounce = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
-            self?.applyBrowserRules(bid)
-        }
-    }
-
-    private func applyBrowserRules(_ bid: String) {
-        let store = RuleStore.shared
-        if let el = elements[bid], let url = extractBrowserURL(el) {
-            for dr in store.domainRules where dr.enabled {
-                if matchDomain(url: url, pattern: dr.domainPattern) {
-                    selectInputSource(dr.inputSourceID)
-                    return
+        if !titleRules.isEmpty, let title = getFocusedWindowTitle(bid: bid) {
+            for rule in titleRules {
+                if !rule.pattern.isEmpty &&
+                   title.localizedCaseInsensitiveContains(rule.pattern) {
+                    return rule.inputSourceID
                 }
             }
         }
-        if let id = resolveInputSource(for: bid) {
-            selectInputSource(id)
+
+        if !processRules.isEmpty {
+            let procs = getTerminalForegroundProcesses(bid: bid)
+            for rule in processRules {
+                if !rule.pattern.isEmpty &&
+                   procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) }) {
+                    return rule.inputSourceID
+                }
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: AX Helpers
+
+    private func getFocusedWindow(bid: String) -> AXUIElement? {
+        guard let el = elements[bid] else { return nil }
+        var win: AnyObject?
+        guard AXUIElementCopyAttributeValue(el, kAXFocusedWindowAttribute as CFString, &win) == .success else { return nil }
+        return (win as! AXUIElement)
+    }
+
+    private func getFocusedWindowTitle(bid: String) -> String? {
+        guard let win = getFocusedWindow(bid: bid) else { return nil }
+        var val: AnyObject?
+        guard AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &val) == .success else { return nil }
+        return val as? String
+    }
+
+    private func getFocusedWindowCWD(bid: String) -> String? {
+        guard let win = getFocusedWindow(bid: bid) else { return nil }
+        var val: AnyObject?
+        guard AXUIElementCopyAttributeValue(win, kAXDocumentAttribute as CFString, &val) == .success,
+              let urlStr = val as? String,
+              let url = URL(string: urlStr) else { return nil }
+        return url.path
+    }
+
+    // MARK: Process Helpers
+
+    private func processCWD(_ pid: Int32) -> String? {
+        var pathInfo = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let ret = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &pathInfo, size)
+        guard ret == size else { return nil }
+        return withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
+            }
         }
     }
 
+    private func procName(from kp: kinfo_proc) -> String {
+        withUnsafePointer(to: kp.kp_proc.p_comm) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXCOMLEN) + 1) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    private func getTerminalForegroundProcesses(bid: String) -> [String] {
+        guard let app = NSWorkspace.shared.runningApplications
+                .first(where: { $0.bundleIdentifier == bid }) else { return [] }
+        let termPid = app.processIdentifier
+        guard let tabCWD = getFocusedWindowCWD(bid: bid) else { return [] }
+
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
+        var size: Int = 0
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+        let count = size / MemoryLayout<kinfo_proc>.stride
+        var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
+        guard sysctl(&mib, 3, &procs, &size, nil, 0) == 0 else { return [] }
+        let actual = size / MemoryLayout<kinfo_proc>.stride
+
+        struct PE { let pid: Int32; let ppid: Int32; let tdev: dev_t; let isFg: Bool; let comm: String }
+        var entries: [PE] = []
+        entries.reserveCapacity(actual)
+        for i in 0..<actual {
+            let kp = procs[i]
+            entries.append(PE(
+                pid: kp.kp_proc.p_pid,
+                ppid: kp.kp_eproc.e_ppid,
+                tdev: kp.kp_eproc.e_tdev,
+                isFg: kp.kp_eproc.e_pgid == kp.kp_eproc.e_tpgid,
+                comm: procName(from: kp)
+            ))
+        }
+
+        var descendants = Set<Int32>()
+        var queue: [Int32] = [termPid]
+        while let p = queue.popLast() {
+            for e in entries where e.ppid == p {
+                descendants.insert(e.pid)
+                queue.append(e.pid)
+            }
+        }
+
+        // Find shell processes among descendants to identify the active tab's tty via CWD
+        let shellNames: Set<String> = ["zsh", "bash", "fish", "login"]
+        let shells = entries.filter { descendants.contains($0.pid) && $0.tdev != 0 && shellNames.contains($0.comm) }
+
+        // Collect all ttys whose shell CWD matches AXDocument
+        var candidateTdevs: [dev_t] = []
+        var matched = Set<dev_t>()
+        for shell in shells {
+            guard !matched.contains(shell.tdev) else { continue }
+            if processCWD(shell.pid) == tabCWD {
+                matched.insert(shell.tdev)
+                candidateTdevs.append(shell.tdev)
+            }
+        }
+
+        guard !candidateTdevs.isEmpty else { return [] }
+
+        // Build a lookup: tdev → foreground process names on that tty
+        let fgByTty: [dev_t: [String]] = {
+            var m: [dev_t: [String]] = [:]
+            for e in entries where descendants.contains(e.pid) && e.isFg && e.tdev != 0 {
+                m[e.tdev, default: []].append(e.comm)
+            }
+            return m
+        }()
+
+        let tdev: dev_t
+        if candidateTdevs.count == 1 {
+            tdev = candidateTdevs[0]
+        } else {
+            // Multiple ttys share the same CWD — use window title to disambiguate.
+            // Shell tabs: title is usually the directory name or a path.
+            // Program tabs: title is set by the program (e.g. claude's task description).
+            let title = getFocusedWindowTitle(bid: bid) ?? ""
+            let cwdBase = URL(fileURLWithPath: tabCWD).lastPathComponent
+            let looksLikeShell = title.isEmpty
+                || title == cwdBase
+                || title.hasSuffix(cwdBase)
+                || title.hasPrefix("/")
+                || title.hasPrefix("~")
+                || shellNames.contains(title)
+
+            if looksLikeShell {
+                tdev = candidateTdevs.first(where: { td in
+                    (fgByTty[td] ?? []).allSatisfy { shellNames.contains($0) }
+                }) ?? candidateTdevs[0]
+            } else {
+                tdev = candidateTdevs.first(where: { td in
+                    (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
+                }) ?? candidateTdevs[0]
+            }
+        }
+
+        return entries
+            .filter { descendants.contains($0.pid) && $0.tdev == tdev && $0.isFg }
+            .map(\.comm)
+    }
+
+    // MARK: Event Handlers
+
     @objc private func activated(_ n: Notification) {
         guard enabled, let bid = bundleID(from: n) else { return }
-        if browserIDs.contains(bid) && observers[bid] == nil { attach(bid) }
-        handleWindowFocus(bid)
+        if isTerminalWithRules(bid) {
+            debouncedResolve(bid)
+        } else {
+            if let id = resolveInputSource(for: bid) {
+                selectInputSource(id)
+            }
+        }
+    }
+
+    private func handleWindowFocus(_ bid: String) {
+        guard enabled else { return }
+        if isTerminalWithRules(bid) {
+            debouncedResolve(bid)
+        } else {
+            if let id = resolveInputSource(for: bid) {
+                selectInputSource(id)
+            }
+        }
+    }
+
+    private func debouncedResolve(_ bid: String) {
+        termDebounce?.invalidate()
+        termDebounce = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            guard let self, self.enabled else { return }
+            if let id = self.resolveInputSource(for: bid) {
+                selectInputSource(id)
+            }
+        }
     }
 
     @objc private func launched(_ n: Notification) {
         guard let bid = bundleID(from: n) else { return }
         let store = RuleStore.shared
-        if store.rules.contains(where: { $0.enabled && $0.appBundleID == bid }) || browserIDs.contains(bid) {
-            attach(bid)
-        }
+        let needsObserver = store.rules.contains(where: { $0.enabled && $0.appBundleID == bid })
+            || (terminalBundleIDs.contains(bid) && store.terminalRules.contains(where: \.enabled))
+        if needsObserver { attach(bid) }
     }
 
     @objc private func terminated(_ n: Notification) {
@@ -428,39 +534,26 @@ class FocusMonitor {
         contexts[bid] = ctx
         let ptr = UnsafeMutableRawPointer(Unmanaged.passUnretained(ctx).toOpaque())
 
-        let cb: AXObserverCallback = { _, _, notification, refcon in
+        let cb: AXObserverCallback = { _, _, _, refcon in
             guard let refcon else { return }
             let c = Unmanaged<AXContext>.fromOpaque(refcon).takeUnretainedValue()
             guard let m = c.monitor, m.enabled else { return }
-            let n = notification as String
-            if n == kAXFocusedUIElementChangedNotification as String {
-                m.handleElementFocus(c.bundleID)
-            } else if n == kAXTitleChangedNotification as String {
-                m.handleTitleChange(c.bundleID)
-            } else {
-                m.handleWindowFocus(c.bundleID)
-            }
+            m.handleWindowFocus(c.bundleID)
         }
 
         var obs: AXObserver?
         guard AXObserverCreate(pid, cb, &obs) == .success, let observer = obs else { return }
         observers[bid] = observer
 
-        var notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
-        if browserIDs.contains(bid) {
-            notifs += [kAXFocusedUIElementChangedNotification, kAXTitleChangedNotification] as [CFString]
-        }
+        let notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
         for name in notifs { AXObserverAddNotification(observer, el, name, ptr) }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
     private func detach(_ bid: String) {
         guard let obs = observers[bid], let el = elements[bid] else { return }
-        let allNotifs = [
-            kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
-            kAXFocusedUIElementChangedNotification, kAXTitleChangedNotification,
-        ] as [CFString]
-        for n in allNotifs { AXObserverRemoveNotification(obs, el, n) }
+        let notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
+        for n in notifs { AXObserverRemoveNotification(obs, el, n) }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
         observers.removeValue(forKey: bid)
         elements.removeValue(forKey: bid)
@@ -472,16 +565,16 @@ class FocusMonitor {
 
 class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private var appTableView: NSTableView!
-    private var domainTableView: NSTableView!
+    private var termTableView: NSTableView!
     private let inputSources = listInputSources()
 
     convenience init() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 480),
                          styleMask: [.titled, .closable, .resizable, .miniaturizable],
                          backing: .buffered, defer: false)
-        w.title = "IMSwitch Settings"
+        w.title = "TermIMS Settings"
         w.center()
-        w.minSize = NSSize(width: 480, height: 380)
+        w.minSize = NSSize(width: 520, height: 380)
         w.isReleasedWhenClosed = false
         self.init(window: w)
         buildUI()
@@ -505,15 +598,15 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         t1.view = buildGeneralTab()
         let t2 = NSTabViewItem(identifier: "apps"); t2.label = "App Rules"
         t2.view = buildAppRulesTab()
-        let t3 = NSTabViewItem(identifier: "browser"); t3.label = "Browser"
-        t3.view = buildBrowserTab()
+        let t3 = NSTabViewItem(identifier: "terminal"); t3.label = "Terminal Rules"
+        t3.view = buildTerminalRulesTab()
 
         tabView.addTabViewItem(t1)
         tabView.addTabViewItem(t2)
         tabView.addTabViewItem(t3)
 
         appTableView.dataSource = self; appTableView.delegate = self
-        domainTableView.dataSource = self; domainTableView.delegate = self
+        termTableView.dataSource = self; termTableView.delegate = self
     }
 
     // MARK: General Tab
@@ -612,7 +705,7 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
 
     private func buildAppRulesTab() -> NSView {
         let v = NSView()
-        let sv = scrolledTable(&appTableView, id: "app")
+        let sv = scrolledTable(&appTableView)
         let addBtn = smallButton("+", action: #selector(addAppRule))
         let rmBtn  = smallButton("\u{2212}", action: #selector(removeAppRule))
         for sub in [sv, addBtn, rmBtn] { v.addSubview(sub) }
@@ -654,46 +747,38 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         RuleStore.shared.rules = rules; appTableView.reloadData()
     }
 
-    // MARK: Browser Tab
+    // MARK: Terminal Rules Tab
 
-    private func buildBrowserTab() -> NSView {
+    private func buildTerminalRulesTab() -> NSView {
         let v = NSView()
         let store = RuleStore.shared
 
-        let abLabel = label("Address Bar Input Method:")
-        let abPopup = imPopup(selected: store.addressBarSourceID, includeNone: true)
-        abPopup.tag = 901
-        abPopup.target = self; abPopup.action = #selector(addressBarIMChanged(_:))
+        let defLabel = label("Default Input Method (in terminal):")
+        let defPopup = imPopup(selected: store.terminalDefaultSourceID, includeNone: true)
+        defPopup.tag = 901
+        defPopup.target = self; defPopup.action = #selector(termDefaultIMChanged(_:))
 
-        let sep = separator()
-        let drLabel = label("Domain Rules:")
-        drLabel.font = .systemFont(ofSize: 11); drLabel.textColor = .secondaryLabelColor
+        let hintLabel = label("When a terminal tab matches a rule below, switch to that rule's input method instead:")
+        hintLabel.font = .systemFont(ofSize: 11)
+        hintLabel.textColor = .secondaryLabelColor
 
-        let sv = NSScrollView(); sv.translatesAutoresizingMaskIntoConstraints = false
-        sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
-        domainTableView = NSTableView()
-        domainTableView.usesAlternatingRowBackgroundColors = true; domainTableView.rowHeight = 28
-        let colOn = NSTableColumn(identifier: .init("don")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
-        let colDom = NSTableColumn(identifier: .init("domain")); colDom.title = "Domain"; colDom.width = 200; colDom.minWidth = 100
-        let colIM = NSTableColumn(identifier: .init("dim")); colIM.title = "Input Method"; colIM.width = 180; colIM.minWidth = 120
-        domainTableView.addTableColumn(colOn); domainTableView.addTableColumn(colDom); domainTableView.addTableColumn(colIM)
-        sv.documentView = domainTableView
+        let sv = scrolledTermTable(&termTableView)
+        let addBtn = smallButton("+", action: #selector(addTermRule))
+        let rmBtn  = smallButton("\u{2212}", action: #selector(removeTermRule))
 
-        let addBtn = smallButton("+", action: #selector(addDomainRule))
-        let rmBtn  = smallButton("\u{2212}", action: #selector(removeDomainRule))
-        for sub in [abLabel, abPopup, sep, drLabel, sv, addBtn, rmBtn] { v.addSubview(sub) }
+        for sub in [defLabel, defPopup, hintLabel, sv, addBtn, rmBtn] { v.addSubview(sub) }
         NSLayoutConstraint.activate([
-            abLabel.topAnchor.constraint(equalTo: v.topAnchor, constant: 16),
-            abLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
-            abPopup.centerYAnchor.constraint(equalTo: abLabel.centerYAnchor),
-            abPopup.leadingAnchor.constraint(equalTo: abLabel.trailingAnchor, constant: 8),
-            abPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
-            sep.topAnchor.constraint(equalTo: abLabel.bottomAnchor, constant: 12),
-            sep.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8),
-            sep.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8),
-            drLabel.topAnchor.constraint(equalTo: sep.bottomAnchor, constant: 8),
-            drLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
-            sv.topAnchor.constraint(equalTo: drLabel.bottomAnchor, constant: 6),
+            defLabel.topAnchor.constraint(equalTo: v.topAnchor, constant: 14),
+            defLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
+            defPopup.centerYAnchor.constraint(equalTo: defLabel.centerYAnchor),
+            defPopup.leadingAnchor.constraint(equalTo: defLabel.trailingAnchor, constant: 8),
+            defPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+
+            hintLabel.topAnchor.constraint(equalTo: defLabel.bottomAnchor, constant: 10),
+            hintLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
+            hintLabel.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -12),
+
+            sv.topAnchor.constraint(equalTo: hintLabel.bottomAnchor, constant: 8),
             sv.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 8),
             sv.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -8),
             sv.bottomAnchor.constraint(equalTo: addBtn.topAnchor, constant: -6),
@@ -705,69 +790,64 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         return v
     }
 
-    @objc private func addressBarIMChanged(_ sender: NSPopUpButton) {
+    @objc private func termDefaultIMChanged(_ sender: NSPopUpButton) {
         let store = RuleStore.shared
         if sender.indexOfSelectedItem == 0 {
-            store.addressBarSourceName = nil; store.addressBarSourceID = nil
+            store.terminalDefaultSourceName = nil; store.terminalDefaultSourceID = nil
         } else {
             let src = inputSources[sender.indexOfSelectedItem - 1]
-            store.addressBarSourceName = src.name; store.addressBarSourceID = src.id
+            store.terminalDefaultSourceName = src.name; store.terminalDefaultSourceID = src.id
         }
     }
 
-    @objc private func addDomainRule() {
-        let alert = NSAlert()
-        alert.messageText = "Add Domain Rule"
-        alert.informativeText = "Enter a domain pattern (e.g. github.com, *.google.com):"
-        alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
-        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        input.placeholderString = "example.com"
-        alert.accessoryView = input
-        alert.beginSheetModal(for: window!) { resp in
-            guard resp == .alertFirstButtonReturn else { return }
-            let domain = input.stringValue.trimmingCharacters(in: .whitespaces)
-            guard !domain.isEmpty else { return }
-            var dr = RuleStore.shared.domainRules
-            let im = self.inputSources.first { $0.id.contains("ABC") } ?? self.inputSources.first
-                     ?? IMSource(id: "com.apple.keylayout.ABC", name: "ABC")
-            dr.append(DomainRule(domainPattern: domain, inputSourceID: im.id, inputSourceName: im.name))
-            RuleStore.shared.domainRules = dr
-            self.domainTableView.reloadData()
-        }
+    @objc private func addTermRule() {
+        let im = inputSources.first { $0.id.contains("ABC") } ?? inputSources.first
+                 ?? IMSource(id: "com.apple.keylayout.ABC", name: "ABC")
+        var rules = RuleStore.shared.terminalRules
+        rules.append(TerminalRule(inputSourceID: im.id, inputSourceName: im.name))
+        RuleStore.shared.terminalRules = rules
+        termTableView.reloadData()
     }
-    @objc private func removeDomainRule() {
-        let r = domainTableView.selectedRow; guard r >= 0 else { return }
-        var dr = RuleStore.shared.domainRules; dr.remove(at: r)
-        RuleStore.shared.domainRules = dr; domainTableView.reloadData()
+
+    @objc private func removeTermRule() {
+        let r = termTableView.selectedRow; guard r >= 0 else { return }
+        var rules = RuleStore.shared.terminalRules; rules.remove(at: r)
+        RuleStore.shared.terminalRules = rules; termTableView.reloadData()
+    }
+
+    private func scrolledTermTable(_ tv: inout NSTableView!) -> NSScrollView {
+        let sv = NSScrollView(); sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
+        tv = NSTableView()
+        tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 24
+        let colOn = NSTableColumn(identifier: .init("ton")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
+        let colType = NSTableColumn(identifier: .init("ttype")); colType.title = "Match"; colType.width = 100; colType.minWidth = 80
+        let colPat = NSTableColumn(identifier: .init("tpat")); colPat.title = "Pattern"; colPat.width = 160; colPat.minWidth = 80
+        let colIM = NSTableColumn(identifier: .init("tim")); colIM.title = "Input Method"; colIM.width = 180; colIM.minWidth = 120
+        tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM)
+        sv.documentView = tv; return sv
     }
 
     // MARK: Table DataSource / Delegate
 
     func numberOfRows(in tv: NSTableView) -> Int {
-        if tv === appTableView { return RuleStore.shared.rules.count }
-        if tv === domainTableView { return RuleStore.shared.domainRules.count }
-        return 0
+        if tv === termTableView { return RuleStore.shared.terminalRules.count }
+        return RuleStore.shared.rules.count
     }
 
     func tableView(_ tv: NSTableView, viewFor col: NSTableColumn?, row: Int) -> NSView? {
-        if tv === appTableView { return appCell(col, row) }
-        if tv === domainTableView { return domainCell(col, row) }
-        return nil
-    }
-
-    // App table cells
-    private func appCell(_ col: NSTableColumn?, _ row: Int) -> NSView? {
+        if tv === termTableView { return termTableCellView(col, row: row) }
         let rules = RuleStore.shared.rules
         guard row < rules.count else { return nil }
         let rule = rules[row]
         switch col?.identifier.rawValue {
         case "on":
-            let btn = recycledCheckbox(appTableView, id: "aon")
+            let btn = recycledCheckbox(tv, id: "aon")
             btn.state = rule.enabled ? .on : .off; btn.tag = row
             btn.target = self; btn.action = #selector(appToggle(_:))
             return btn
         case "app":
-            let cell = recycledAppCell(appTableView)
+            let cell = recycledAppCell(tv)
             cell.textField?.stringValue = rule.appName
             if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: rule.appBundleID) {
                 cell.imageView?.image = NSWorkspace.shared.icon(forFile: url.path)
@@ -776,7 +856,7 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
             }
             return cell
         case "im":
-            let popup = recycledIMPopup(appTableView, id: "aim")
+            let popup = recycledIMPopup(tv, id: "aim")
             configureIMPopup(popup, selected: rule.inputSourceID, row: row)
             popup.target = self; popup.action = #selector(appIMChanged(_:))
             return popup
@@ -784,34 +864,47 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         }
     }
 
-    // Domain table cells
-    private func domainCell(_ col: NSTableColumn?, _ row: Int) -> NSView? {
-        let dr = RuleStore.shared.domainRules
-        guard row < dr.count else { return nil }
-        let rule = dr[row]
+    private func centeredCellView(_ tv: NSTableView, id: String, control: NSView) -> NSView {
+        let cell = NSTableCellView()
+        cell.identifier = NSUserInterfaceItemIdentifier(id + "cell")
+        control.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(control)
+        NSLayoutConstraint.activate([
+            control.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+            control.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+            control.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    private func termTableCellView(_ col: NSTableColumn?, row: Int) -> NSView? {
+        let rules = RuleStore.shared.terminalRules
+        guard row < rules.count else { return nil }
+        let rule = rules[row]
         switch col?.identifier.rawValue {
-        case "don":
-            let btn = recycledCheckbox(domainTableView, id: "don")
+        case "ton":
+            let btn = recycledCheckbox(termTableView, id: "ton")
             btn.state = rule.enabled ? .on : .off; btn.tag = row
-            btn.target = self; btn.action = #selector(domainToggle(_:))
-            return btn
-        case "domain":
-            let id = NSUserInterfaceItemIdentifier("domtf")
-            let tf: NSTextField
-            if let v = domainTableView.makeView(withIdentifier: id, owner: nil) as? NSTextField { tf = v }
-            else {
-                tf = NSTextField(); tf.identifier = id
-                tf.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-                tf.isBordered = false; tf.drawsBackground = false
-            }
-            tf.stringValue = rule.domainPattern; tf.tag = row
-            tf.target = self; tf.action = #selector(domainPatternChanged(_:))
-            return tf
-        case "dim":
-            let popup = recycledIMPopup(domainTableView, id: "dim")
+            btn.target = self; btn.action = #selector(termToggle(_:))
+            return centeredCellView(termTableView, id: "ton\(row)", control: btn)
+        case "ttype":
+            let popup = recycledMatchTypePopup(termTableView)
+            popup.removeAllItems()
+            for t in TerminalMatchType.allCases { popup.addItem(withTitle: t.rawValue) }
+            if let idx = TerminalMatchType.allCases.firstIndex(of: rule.matchType) { popup.selectItem(at: idx) }
+            popup.tag = row
+            popup.target = self; popup.action = #selector(termMatchTypeChanged(_:))
+            return centeredCellView(termTableView, id: "ttype\(row)", control: popup)
+        case "tpat":
+            let tf = recycledPatternField(termTableView)
+            tf.stringValue = rule.pattern; tf.tag = row
+            tf.target = self; tf.action = #selector(termPatternChanged(_:))
+            return centeredCellView(termTableView, id: "tpat\(row)", control: tf)
+        case "tim":
+            let popup = recycledIMPopup(termTableView, id: "tim")
             configureIMPopup(popup, selected: rule.inputSourceID, row: row)
-            popup.target = self; popup.action = #selector(domainIMChanged(_:))
-            return popup
+            popup.target = self; popup.action = #selector(termIMChanged(_:))
+            return centeredCellView(termTableView, id: "tim\(row)", control: popup)
         default: return nil
         }
     }
@@ -827,18 +920,24 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         guard s.tag < r.count, let item = s.selectedItem, let sid = item.representedObject as? String else { return }
         r[s.tag].inputSourceID = sid; r[s.tag].inputSourceName = item.title; RuleStore.shared.rules = r
     }
-    @objc private func domainToggle(_ s: NSButton) {
-        var r = RuleStore.shared.domainRules; guard s.tag < r.count else { return }
-        r[s.tag].enabled = s.state == .on; RuleStore.shared.domainRules = r
+
+    @objc private func termToggle(_ s: NSButton) {
+        var r = RuleStore.shared.terminalRules; guard s.tag < r.count else { return }
+        r[s.tag].enabled = s.state == .on; RuleStore.shared.terminalRules = r
     }
-    @objc private func domainPatternChanged(_ s: NSTextField) {
-        var r = RuleStore.shared.domainRules; guard s.tag < r.count else { return }
-        r[s.tag].domainPattern = s.stringValue; RuleStore.shared.domainRules = r
+    @objc private func termMatchTypeChanged(_ s: NSPopUpButton) {
+        var r = RuleStore.shared.terminalRules; guard s.tag < r.count else { return }
+        r[s.tag].matchType = TerminalMatchType.allCases[s.indexOfSelectedItem]
+        RuleStore.shared.terminalRules = r
     }
-    @objc private func domainIMChanged(_ s: NSPopUpButton) {
-        var r = RuleStore.shared.domainRules
+    @objc private func termPatternChanged(_ s: NSTextField) {
+        var r = RuleStore.shared.terminalRules; guard s.tag < r.count else { return }
+        r[s.tag].pattern = s.stringValue; RuleStore.shared.terminalRules = r
+    }
+    @objc private func termIMChanged(_ s: NSPopUpButton) {
+        var r = RuleStore.shared.terminalRules
         guard s.tag < r.count, let item = s.selectedItem, let sid = item.representedObject as? String else { return }
-        r[s.tag].inputSourceID = sid; r[s.tag].inputSourceName = item.title; RuleStore.shared.domainRules = r
+        r[s.tag].inputSourceID = sid; r[s.tag].inputSourceName = item.title; RuleStore.shared.terminalRules = r
     }
 
     // MARK: View Factories
@@ -870,11 +969,11 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         return p
     }
 
-    private func scrolledTable(_ tv: inout NSTableView!, id: String) -> NSScrollView {
+    private func scrolledTable(_ tv: inout NSTableView!) -> NSScrollView {
         let sv = NSScrollView(); sv.translatesAutoresizingMaskIntoConstraints = false
         sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
         tv = NSTableView()
-        tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 30
+        tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 24
         let colOn = NSTableColumn(identifier: .init("on")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
         let colApp = NSTableColumn(identifier: .init("app")); colApp.title = "Application"; colApp.width = 200; colApp.minWidth = 120
         let colIM = NSTableColumn(identifier: .init("im")); colIM.title = "Input Method"; colIM.width = 200; colIM.minWidth = 120
@@ -914,11 +1013,116 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         return p
     }
 
+    private func recycledMatchTypePopup(_ tv: NSTableView) -> NSPopUpButton {
+        let uid = NSUserInterfaceItemIdentifier("tmtype")
+        if let v = tv.makeView(withIdentifier: uid, owner: nil) as? NSPopUpButton { return v }
+        let p = NSPopUpButton(frame: .zero, pullsDown: false)
+        p.identifier = uid; p.controlSize = .small; p.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        return p
+    }
+
+    private func recycledPatternField(_ tv: NSTableView) -> NSTextField {
+        let uid = NSUserInterfaceItemIdentifier("tpat")
+        if let v = tv.makeView(withIdentifier: uid, owner: nil) as? NSTextField { return v }
+        let tf = NSTextField()
+        tf.identifier = uid; tf.controlSize = .small; tf.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        tf.placeholderString = "e.g. claude, nvim"
+        tf.lineBreakMode = .byTruncatingTail; tf.cell?.sendsActionOnEndEditing = true
+        return tf
+    }
+
     private func configureIMPopup(_ popup: NSPopUpButton, selected sid: String, row: Int) {
         popup.removeAllItems()
         for src in inputSources { popup.addItem(withTitle: src.name); popup.lastItem?.representedObject = src.id }
         if let idx = inputSources.firstIndex(where: { $0.id == sid }) { popup.selectItem(at: idx) }
         popup.tag = row
+    }
+}
+
+// MARK: - Permission Window
+
+class PermissionWindowController: NSWindowController {
+    private var pollTimer: Timer?
+    var onGranted: (() -> Void)?
+
+    convenience init() {
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 200),
+                         styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = "TermIMS"
+        w.center()
+        w.isReleasedWhenClosed = false
+        self.init(window: w)
+        buildUI()
+    }
+
+    private func buildUI() {
+        guard let cv = window?.contentView else { return }
+
+        let icon = NSImageView()
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        icon.image = NSImage(systemSymbolName: "lock.shield", accessibilityDescription: nil)
+        icon.symbolConfiguration = .init(pointSize: 36, weight: .light)
+        icon.contentTintColor = .secondaryLabelColor
+
+        let title = NSTextField(labelWithString: "Accessibility Permission Required")
+        title.translatesAutoresizingMaskIntoConstraints = false
+        title.font = .systemFont(ofSize: 16, weight: .semibold)
+
+        let desc = NSTextField(wrappingLabelWithString:
+            "TermIMS needs accessibility access to detect app switches and change input methods. Please enable it in System Settings > Privacy & Security > Accessibility.")
+        desc.translatesAutoresizingMaskIntoConstraints = false
+        desc.font = .systemFont(ofSize: 12)
+        desc.textColor = .secondaryLabelColor
+
+        let openBtn = NSButton(title: "Open System Settings", target: self, action: #selector(openSettings))
+        openBtn.translatesAutoresizingMaskIntoConstraints = false
+        openBtn.bezelStyle = .rounded
+        openBtn.keyEquivalent = "\r"
+
+        let quitBtn = NSButton(title: "Quit", target: self, action: #selector(quitApp))
+        quitBtn.translatesAutoresizingMaskIntoConstraints = false
+        quitBtn.bezelStyle = .rounded
+
+        for sub in [icon, title, desc, openBtn, quitBtn] { cv.addSubview(sub) }
+        NSLayoutConstraint.activate([
+            icon.topAnchor.constraint(equalTo: cv.topAnchor, constant: 24),
+            icon.centerXAnchor.constraint(equalTo: cv.centerXAnchor),
+
+            title.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 12),
+            title.centerXAnchor.constraint(equalTo: cv.centerXAnchor),
+
+            desc.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            desc.leadingAnchor.constraint(equalTo: cv.leadingAnchor, constant: 32),
+            desc.trailingAnchor.constraint(equalTo: cv.trailingAnchor, constant: -32),
+
+            openBtn.topAnchor.constraint(equalTo: desc.bottomAnchor, constant: 16),
+            openBtn.trailingAnchor.constraint(equalTo: cv.centerXAnchor, constant: -6),
+            openBtn.bottomAnchor.constraint(equalTo: cv.bottomAnchor, constant: -16),
+
+            quitBtn.topAnchor.constraint(equalTo: desc.bottomAnchor, constant: 16),
+            quitBtn.leadingAnchor.constraint(equalTo: cv.centerXAnchor, constant: 6),
+            quitBtn.widthAnchor.constraint(equalTo: openBtn.widthAnchor),
+        ])
+    }
+
+    func startPolling() {
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            if AXIsProcessTrusted() {
+                self?.pollTimer?.invalidate()
+                self?.pollTimer = nil
+                self?.window?.close()
+                self?.onGranted?()
+            }
+        }
+    }
+
+    @objc private func openSettings() {
+        AXIsProcessTrustedWithOptions(
+            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
+    }
+
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
     }
 }
 
@@ -929,17 +1133,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let monitor = FocusMonitor()
     private let indicator = IndicatorPanel()
     private var settingsWC: SettingsWindowController?
+    private var permissionWC: PermissionWindowController?
     private var enabledItem: NSMenuItem!
     private var loginItem: NSMenuItem!
+    private var permissionPollTimer: Timer?
+    private var wasTrusted = false
 
     private var launchAgentPath: String {
-        NSHomeDirectory() + "/Library/LaunchAgents/com.user.imswitch.plist"
+        NSHomeDirectory() + "/Library/LaunchAgents/top.cuiko.termims.plist"
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
-        AXIsProcessTrustedWithOptions(
-            [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary)
+        if AXIsProcessTrusted() {
+            wasTrusted = true
+            startApp()
+        } else {
+            showPermissionWindow()
+        }
+        startPermissionPolling()
+    }
 
+    private func startPermissionPolling() {
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let trusted = AXIsProcessTrusted()
+            if self.wasTrusted && !trusted {
+                self.wasTrusted = false
+                self.monitor.stop()
+                self.rebuildMenu()
+            } else if !self.wasTrusted && trusted {
+                self.wasTrusted = true
+                self.startApp()
+            }
+        }
+    }
+
+    private func showPermissionWindow() {
+        permissionWC = PermissionWindowController()
+        permissionWC?.onGranted = { [weak self] in
+            self?.permissionWC = nil
+            self?.startApp()
+        }
+        permissionWC?.showWindow(nil)
+        permissionWC?.startPolling()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private var appStarted = false
+    private func startApp() {
+        guard !appStarted else { rebuildMenu(); monitor.reload(); return }
+        appStarted = true
         applyMenuBarVisibility()
         NotificationCenter.default.addObserver(self, selector: #selector(rebuildMenu),
                                                name: .rulesDidChange, object: nil)
@@ -949,7 +1192,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        showSettings()
+        if !AXIsProcessTrusted() {
+            showPermissionWindow()
+        } else {
+            showSettings()
+        }
         return true
     }
 
@@ -969,7 +1216,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if statusItem == nil {
                 statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
                 if let btn = statusItem?.button {
-                    btn.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "IMSwitch")
+                    btn.image = NSImage(systemSymbolName: "keyboard", accessibilityDescription: "TermIMS")
                 }
             }
             rebuildMenu()
@@ -982,6 +1229,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let menu = NSMenu()
         let store = RuleStore.shared
+        let trusted = AXIsProcessTrusted()
+
+        if !trusted {
+            let warn = NSMenuItem(title: "Accessibility Permission Required", action: #selector(showPermissionPrompt), keyEquivalent: "")
+            warn.target = self
+            warn.image = NSImage(systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+            menu.addItem(warn)
+            menu.addItem(.separator())
+        }
 
         enabledItem = NSMenuItem(title: "Enabled", action: #selector(toggleEnabled), keyEquivalent: "")
         enabledItem.target = self; enabledItem.state = monitor.enabled ? .on : .off
@@ -992,21 +1248,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let defItem = NSMenuItem(title: "Default: \(defName)", action: nil, keyEquivalent: "")
         defItem.isEnabled = false; menu.addItem(defItem)
 
-        if let abName = store.addressBarSourceName {
-            let abItem = NSMenuItem(title: "Address Bar: \(abName)", action: nil, keyEquivalent: "")
-            abItem.isEnabled = false; menu.addItem(abItem)
-        }
-
-        if !store.rules.isEmpty || !store.domainRules.isEmpty { menu.addItem(.separator()) }
+        if !store.rules.isEmpty { menu.addItem(.separator()) }
         for rule in store.rules {
             let s = rule.enabled ? "\u{2713}" : "\u{2717}"
             let item = NSMenuItem(title: "\(s)  \(rule.appName) \u{2192} \(rule.inputSourceName)", action: nil, keyEquivalent: "")
             item.isEnabled = false; menu.addItem(item)
         }
-        for dr in store.domainRules {
-            let s = dr.enabled ? "\u{2713}" : "\u{2717}"
-            let item = NSMenuItem(title: "\(s)  \(dr.domainPattern) \u{2192} \(dr.inputSourceName)", action: nil, keyEquivalent: "")
-            item.isEnabled = false; menu.addItem(item)
+
+        let termRules = store.terminalRules.filter(\.enabled)
+        if !termRules.isEmpty {
+            menu.addItem(.separator())
+            let hdr = NSMenuItem(title: "Terminal Rules", action: nil, keyEquivalent: "")
+            hdr.isEnabled = false; menu.addItem(hdr)
+            for rule in termRules {
+                let typeStr = rule.matchType == .title ? "title" : "proc"
+                let item = NSMenuItem(title: "  \(typeStr):\(rule.pattern) \u{2192} \(rule.inputSourceName)", action: nil, keyEquivalent: "")
+                item.isEnabled = false; menu.addItem(item)
+            }
         }
 
         menu.addItem(.separator())
@@ -1020,7 +1278,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(loginItem)
 
         menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit IMSwitch", action: #selector(quitApp), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit TermIMS", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self; menu.addItem(quit)
 
         statusItem.menu = menu
@@ -1029,7 +1287,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func toggleEnabled() {
         monitor.enabled.toggle(); enabledItem.state = monitor.enabled ? .on : .off
     }
+    @objc private func showPermissionPrompt() {
+        showPermissionWindow()
+    }
     @objc private func showSettings() {
+        if !AXIsProcessTrusted() { showPermissionWindow(); return }
         if settingsWC == nil { settingsWC = SettingsWindowController() }
         settingsWC?.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
     }
@@ -1040,7 +1302,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             try? fm.createDirectory(atPath: NSHomeDirectory() + "/Library/LaunchAgents", withIntermediateDirectories: true)
             let plist: NSDictionary = [
-                "Label": "com.user.imswitch",
+                "Label": "top.cuiko.termims",
                 "ProgramArguments": [Bundle.main.executablePath ?? ""],
                 "RunAtLoad": true,
             ]
