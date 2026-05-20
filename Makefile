@@ -8,7 +8,7 @@ PLIST      := Info.plist
 DIST_DIR   := dist
 FRAMEWORKS := -framework Cocoa -framework Carbon
 
-.PHONY: build install clean restart dist
+.PHONY: build install clean run dist
 
 build: $(BIN)
 
@@ -26,9 +26,9 @@ install: build
 	@cp -a $(BUNDLE) $(INSTALL_DIR)
 	@echo "Installed → $(INSTALL_DIR)"
 
-restart: install
+run: install
 	@open $(INSTALL_DIR)
-	@echo "Restarted"
+	@echo "Running"
 
 dist: build
 	@rm -rf $(BUILD_DIR)/dmg-staging $(DIST_DIR)

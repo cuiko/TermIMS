@@ -47,7 +47,7 @@ make build
 make install
 
 # Build, install, and launch
-make restart
+make run
 
 # Package as DMG for distribution
 make dist
@@ -55,7 +55,7 @@ make dist
 
 ## Usage
 
-1. Launch TermIMS (or run `make restart`).
+1. Launch TermIMS (or run `make run`).
 2. Grant Accessibility permission when prompted.
 3. Click the keyboard icon in the menu bar → **Settings**.
 4. **General** tab — Set the global default input method, indicator preferences.
