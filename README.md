@@ -8,7 +8,7 @@
 
 - **Per-app input method rules** — Assign a specific input method to any application. When you switch to that app, the input method changes automatically.
 - **Terminal sub-rules** — For terminal emulators (Ghostty, Terminal.app, iTerm2, kitty, wezterm, Warp, Alacritty), define additional rules that match by:
-  - **Process name** — e.g., switch to Chinese when `claude` or `nvim` is running in the active tab
+  - **Process name** — e.g., switch to Chinese when `claude` or `nvim` is running in the active tab or split pane
   - **Tab title** — e.g., match a keyword in the terminal window title
 - **Global default** — Set a fallback input method for apps without specific rules.
 - **Terminal default** — Set a separate default for terminal apps when no sub-rule matches.

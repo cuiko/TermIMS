@@ -555,14 +555,18 @@ class FocusMonitor {
         guard AXObserverCreate(pid, cb, &obs) == .success, let observer = obs else { return }
         observers[bid] = observer
 
-        let notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
+        var notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
+        if terminalBundleIDs.contains(bid) {
+            notifs.append(kAXFocusedUIElementChangedNotification as CFString)
+        }
         for name in notifs { AXObserverAddNotification(observer, el, name, ptr) }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
     }
 
     private func detach(_ bid: String) {
         guard let obs = observers[bid], let el = elements[bid] else { return }
-        let notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
+        let notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
+                      kAXFocusedUIElementChangedNotification] as [CFString]
         for n in notifs { AXObserverRemoveNotification(obs, el, n) }
         CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
         observers.removeValue(forKey: bid)
