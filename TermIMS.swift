@@ -412,11 +412,9 @@ class FocusMonitor {
             }
         }
 
-        // Find shell processes among descendants to identify the active tab's tty via CWD
         let shellNames: Set<String> = ["zsh", "bash", "fish", "login"]
         let shells = entries.filter { descendants.contains($0.pid) && $0.tdev != 0 && shellNames.contains($0.comm) }
 
-        // Collect all ttys whose shell CWD matches AXDocument
         var candidateTdevs: [dev_t] = []
         var matched = Set<dev_t>()
         for shell in shells {
@@ -429,7 +427,6 @@ class FocusMonitor {
 
         guard !candidateTdevs.isEmpty else { return [] }
 
-        // Build a lookup: tdev → foreground process names on that tty
         let fgByTty: [dev_t: [String]] = {
             var m: [dev_t: [String]] = [:]
             for e in entries where descendants.contains(e.pid) && e.isFg && e.tdev != 0 {
@@ -442,8 +439,6 @@ class FocusMonitor {
         if candidateTdevs.count == 1 {
             tdev = candidateTdevs[0]
         } else {
-            // Multiple ttys share the same CWD — use window title to pick the shell
-            // vs non-shell branch, then tty mtime to disambiguate within each branch.
             let title = getFocusedWindowTitle(bid: bid) ?? ""
             let cwdBase = URL(fileURLWithPath: tabCWD).lastPathComponent
             let looksLikeShell = title.isEmpty
@@ -462,13 +457,21 @@ class FocusMonitor {
                     (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
                 }
                 if nonShellTdevs.count > 1 {
-                    func mtime(_ d: dev_t) -> (Int, Int) {
-                        guard let n = devname(d, mode_t(S_IFCHR)) else { return (0, 0) }
-                        var sb = stat()
-                        guard lstat("/dev/" + String(cString: n), &sb) == 0 else { return (0, 0) }
-                        return (sb.st_mtimespec.tv_sec, sb.st_mtimespec.tv_nsec)
+                    if let titleMatch = nonShellTdevs.first(where: { td in
+                        (fgByTty[td] ?? []).contains(where: { proc in
+                            !shellNames.contains(proc) && title.localizedCaseInsensitiveContains(proc)
+                        })
+                    }) {
+                        tdev = titleMatch
+                    } else {
+                        func mtime(_ d: dev_t) -> (Int, Int) {
+                            guard let n = devname(d, mode_t(S_IFCHR)) else { return (0, 0) }
+                            var sb = stat()
+                            guard lstat("/dev/" + String(cString: n), &sb) == 0 else { return (0, 0) }
+                            return (sb.st_mtimespec.tv_sec, sb.st_mtimespec.tv_nsec)
+                        }
+                        tdev = nonShellTdevs.max(by: { mtime($0) < mtime($1) }) ?? nonShellTdevs[0]
                     }
-                    tdev = nonShellTdevs.max(by: { mtime($0) < mtime($1) }) ?? nonShellTdevs[0]
                 } else {
                     tdev = nonShellTdevs.first ?? candidateTdevs[0]
                 }
