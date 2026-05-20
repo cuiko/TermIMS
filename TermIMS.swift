@@ -442,9 +442,8 @@ class FocusMonitor {
         if candidateTdevs.count == 1 {
             tdev = candidateTdevs[0]
         } else {
-            // Multiple ttys share the same CWD — use window title to disambiguate.
-            // Shell tabs: title is usually the directory name or a path.
-            // Program tabs: title is set by the program (e.g. claude's task description).
+            // Multiple ttys share the same CWD — use window title to pick the shell
+            // vs non-shell branch, then tty mtime to disambiguate within each branch.
             let title = getFocusedWindowTitle(bid: bid) ?? ""
             let cwdBase = URL(fileURLWithPath: tabCWD).lastPathComponent
             let looksLikeShell = title.isEmpty
@@ -459,9 +458,20 @@ class FocusMonitor {
                     (fgByTty[td] ?? []).allSatisfy { shellNames.contains($0) }
                 }) ?? candidateTdevs[0]
             } else {
-                tdev = candidateTdevs.first(where: { td in
+                let nonShellTdevs = candidateTdevs.filter { td in
                     (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
-                }) ?? candidateTdevs[0]
+                }
+                if nonShellTdevs.count > 1 {
+                    func mtime(_ d: dev_t) -> (Int, Int) {
+                        guard let n = devname(d, mode_t(S_IFCHR)) else { return (0, 0) }
+                        var sb = stat()
+                        guard lstat("/dev/" + String(cString: n), &sb) == 0 else { return (0, 0) }
+                        return (sb.st_mtimespec.tv_sec, sb.st_mtimespec.tv_nsec)
+                    }
+                    tdev = nonShellTdevs.max(by: { mtime($0) < mtime($1) }) ?? nonShellTdevs[0]
+                } else {
+                    tdev = nonShellTdevs.first ?? candidateTdevs[0]
+                }
             }
         }
 
