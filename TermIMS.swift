@@ -401,6 +401,45 @@ extension Notification.Name {
     static let imDidSwitch    = Notification.Name("IMDidSwitch")
 }
 
+// MARK: - Title Heuristics
+//
+// Shared predicates used by terminals that fall through to the generic
+// matching path (no native tty channel). Both Ghostty (cwd-based path) and
+// Warp (descendant fallback) use these to ask the same two questions about
+// the focused window's title; the orchestration around them stays per-path
+// because the upstream signals differ (Ghostty has AXDocument cwd, Warp
+// doesn't).
+
+fileprivate extension String {
+    /// Does this title contain any of `processNames` as a case-insensitive
+    /// substring? Empty names never match.
+    func mentionsAny(of processNames: [String]) -> Bool {
+        let lower = self.lowercased()
+        return processNames.contains { !$0.isEmpty && lower.contains($0.lowercased()) }
+    }
+
+    /// Does this title look like it is displaying `cwd` (the focused tab's
+    /// own working directory)? Matches: the cwd's basename exactly, the
+    /// absolute path as substring, the tilde-collapsed form as substring,
+    /// and Ghostty's "…/tail/of/path" truncation. A title that mentions some
+    /// other path will not match — useful to distinguish a shell prompt
+    /// showing the tab's cwd from a foreground command title that happens
+    /// to contain unrelated paths.
+    func showsCwd(_ cwd: String) -> Bool {
+        guard !self.isEmpty else { return false }
+        let base = (cwd as NSString).lastPathComponent
+        if self == base { return true }
+        if self.contains(cwd) { return true }
+        let home = NSHomeDirectory()
+        if cwd.hasPrefix(home) {
+            let tilded = "~" + cwd.dropFirst(home.count)
+            if self.contains(tilded) { return true }
+        }
+        if self.hasPrefix("…"), cwd.hasSuffix(String(self.dropFirst())) { return true }
+        return false
+    }
+}
+
 // MARK: - Log
 //
 // Single-line append-only log gated by RuleStore.debugLogEnabled.
@@ -836,24 +875,26 @@ class FocusMonitor {
             }
             let rawTitle = getFocusedWindowTitle(bid: bid) ?? ""
             if byTty.count > 1 {
-                let title = rawTitle.lowercased()
-
                 // 1. Title literally names a fg process (e.g. "cc-connect",
                 //    "✳ Claude Code"). Catches Warp's cc/cc-connect tabs.
+                //    Shell process names are excluded so a title like
+                //    "Running zsh in foo" doesn't match every candidate.
                 for (_, procs) in byTty {
-                    if procs.contains(where: { !$0.isEmpty && title.contains($0.lowercased()) }) {
+                    let nonShellOnly = procs.filter { !shellNamesFallback.contains($0) }
+                    if rawTitle.mentionsAny(of: nonShellOnly) {
                         Log.debug("DESCENDANT FALLBACK: title=\(rawTitle) proc-match → \(procs)")
                         return [procs]
                     }
                 }
 
-                // 2. Title looks like a local path / "~" prefix (Warp tags
-                //    idle shell tabs with their cwd). Match against each
-                //    candidate shell's cwd to pick the focused one. When
-                //    multiple ttys share the cwd, prefer the one whose fg
-                //    is only a shell — a bare-cwd title means the user is
-                //    at a prompt, not running a foreground command.
-                if title.hasPrefix("~") || title.hasPrefix("/") {
+                // 2. Title is a bare path (Warp tags idle shell tabs with
+                //    their cwd). Match against each candidate shell's cwd
+                //    to pick the focused one. When multiple ttys share the
+                //    cwd, prefer the one whose fg is only a shell — a
+                //    bare-cwd title means the user is at a prompt, not
+                //    running a foreground command. Gate on `~`/`/` prefix
+                //    so titles like "bwg-us:~" (ssh tab) don't false-match.
+                if rawTitle.hasPrefix("~") || rawTitle.hasPrefix("/") {
                     let expanded = (rawTitle as NSString).expandingTildeInPath
                     var matches: [(dev_t, [String])] = []
                     for (tdev, procs) in byTty {
@@ -916,26 +957,9 @@ class FocusMonitor {
         }
 
         let title = getFocusedWindowTitle(bid: bid) ?? ""
-        let cwdBase = URL(fileURLWithPath: tabCWD).lastPathComponent
-        // "Looks like a shell prompt" = the title is showing this tab's own
-        // cwd in some shape (basename, absolute path, tilde-collapsed,
-        // Ghostty's "…/" truncation, or wrapped inside a prompt theme like
-        // `(main) ~/path`). We deliberately do NOT use a broad `contains("/")`
-        // — a cc summary like "Running zsh in ~/foo" carries an unrelated
-        // path and would otherwise misroute the cc tab to a sibling shell.
-        let home = NSHomeDirectory()
-        let tildeCwd = tabCWD.hasPrefix(home) ? "~" + tabCWD.dropFirst(home.count) : tabCWD
-        let looksLikeShell: Bool = {
-            guard !title.isEmpty else { return false }
-            if title == cwdBase { return true }
-            if shellNames.contains(title) { return true }
-            if title.contains(tabCWD) { return true }
-            if title.contains(tildeCwd) { return true }
-            // Ghostty truncates long paths to "…/tail/of/path"; check that
-            // the post-ellipsis substring is a suffix of the cwd.
-            if title.hasPrefix("…"), tabCWD.hasSuffix(String(title.dropFirst())) { return true }
-            return false
-        }()
+        // Shell prompt signal: title equals a bare shell name, or shows the
+        // focused tab's own cwd in any of the recognised forms.
+        let looksLikeShell = shellNames.contains(title) || title.showsCwd(tabCWD)
 
         if looksLikeShell {
             let tdev = candidateTdevs.first(where: { td in
@@ -955,10 +979,12 @@ class FocusMonitor {
         // checking which candidate's fg process name appears in the window
         // title. Works for terminals that auto-set the title to the running
         // command (Ghostty, kitty, etc.) when several tabs share a cwd.
-        let titleLower = title.lowercased()
+        // Shell processes are excluded so a title like "Running zsh in foo"
+        // doesn't accidentally match every candidate (every tty has zsh).
         for td in nonShellTdevs {
             let procs = ttyProcs(td)
-            if procs.contains(where: { !$0.isEmpty && titleLower.contains($0.lowercased()) }) {
+            let nonShellOnly = procs.filter { !shellNames.contains($0) }
+            if title.mentionsAny(of: nonShellOnly) {
                 Log.debug("CWD MULTI title=\(title) → \(procs)")
                 return [procs]
             }
