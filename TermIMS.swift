@@ -107,11 +107,35 @@ protocol TerminalAdapter {
     /// windows, each with its own listen socket).
     /// Default implementation: nil → caller uses the generic CWD heuristic.
     func focusedTty(appPid: pid_t) -> dev_t?
+
+    /// Title string used by the rule matcher's heuristics. Default returns
+    /// the focused window's kAXTitleAttribute. Override for terminals whose
+    /// window title doesn't track focus reliably — Warp keeps the window
+    /// title at whichever tab most recently set OSC 2, so we read the
+    /// focused text area's value (which IS per-tab) instead.
+    func focusedTitle(appElement: AXUIElement) -> String?
 }
 
 extension TerminalAdapter {
     var needsTitleChangeNotification: Bool { false }
     func focusedTty(appPid: pid_t) -> dev_t? { nil }
+    func focusedTitle(appElement: AXUIElement) -> String? {
+        defaultFocusedWindowTitle(appElement: appElement)
+    }
+}
+
+/// Helper exposed to adapter implementations: read kAXTitleAttribute on the
+/// focused window. Used as the default `focusedTitle` and as a fallback by
+/// adapters that combine it with other signals.
+fileprivate func defaultFocusedWindowTitle(appElement: AXUIElement) -> String? {
+    var winObj: AnyObject?
+    guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &winObj) == .success,
+          let raw = winObj,
+          CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+    let win = raw as! AXUIElement
+    var titleObj: AnyObject?
+    guard AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleObj) == .success else { return nil }
+    return titleObj as? String
 }
 
 struct DefaultTerminalAdapter: TerminalAdapter {
@@ -743,10 +767,8 @@ class FocusMonitor {
     }
 
     private func getFocusedWindowTitle(bid: String) -> String? {
-        guard let win = getFocusedWindow(bid: bid) else { return nil }
-        var val: AnyObject?
-        guard AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &val) == .success else { return nil }
-        return val as? String
+        guard let app = elements[bid] else { return nil }
+        return TerminalAdapters.adapter(for: bid).focusedTitle(appElement: app)
     }
 
     private struct TabInfo { let cwd: String; let tty: dev_t? }
