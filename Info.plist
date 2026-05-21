@@ -24,5 +24,7 @@
     <true/>
     <key>NSAccessibilityUsageDescription</key>
     <string>TermIMS needs accessibility access to monitor application focus changes and switch input methods automatically.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>TermIMS queries Terminal.app via AppleScript to identify the focused tab's tty for precise input method switching.</string>
 </dict>
 </plist>

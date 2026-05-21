@@ -81,19 +81,427 @@ enum IndicatorPosition: String, Codable, CaseIterable {
     case bottomRight   = "Bottom Right"
 }
 
-let terminalBundleIDs: Set<String> = [
-    "com.mitchellh.ghostty",
-    "com.apple.Terminal",
-    "com.googlecode.iterm2",
-    "net.kovidgoyal.kitty",
-    "com.github.wez.wezterm",
-    "dev.warp.Warp-Stable",
-    "org.alacritty",
-]
+// MARK: - Terminal Adapters
+//
+// Strategy pattern: each terminal app encapsulates its own native ways to
+// disambiguate the focused tab. `focusedTty(...)` is the only protocol method;
+// returning a non-nil tty lets the matcher skip the cwd-based candidate
+// heuristic entirely. Adapters that don't have a native channel return nil
+// and the system falls back to BFS + cwd matching.
+
+protocol TerminalAdapter {
+    var bundleID: String { get }
+
+    /// Whether the matcher should also subscribe to `kAXTitleChangedNotification`
+    /// for this terminal. Useful for terminals that render multiple panes
+    /// inside a single AX window (e.g. kitty splits) and thus signal pane
+    /// focus changes only via title updates. Most terminals get this wrong
+    /// when foreground programs animate their title (cc's braille spinner),
+    /// so default is false.
+    var needsTitleChangeNotification: Bool { get }
+
+    /// Resolve the focused tab's tty (e.g. via AppleScript, CLI, IPC).
+    /// `appPid` is the PID of the terminal app instance whose focus event
+    /// triggered this lookup — adapters use it to disambiguate when the user
+    /// runs multiple instances of the same terminal (e.g. several kitty
+    /// windows, each with its own listen socket).
+    /// Default implementation: nil → caller uses the generic CWD heuristic.
+    func focusedTty(appPid: pid_t) -> dev_t?
+
+    /// Title string used by the rule matcher's heuristics. Default returns
+    /// the focused window's kAXTitleAttribute. Override for terminals whose
+    /// window title doesn't track focus reliably — Warp keeps the window
+    /// title at whichever tab most recently set OSC 2, so we read the
+    /// focused text area's value (which IS per-tab) instead.
+    func focusedTitle(appElement: AXUIElement) -> String?
+}
+
+extension TerminalAdapter {
+    var needsTitleChangeNotification: Bool { false }
+    func focusedTty(appPid: pid_t) -> dev_t? { nil }
+    func focusedTitle(appElement: AXUIElement) -> String? {
+        defaultFocusedWindowTitle(appElement: appElement)
+    }
+}
+
+/// Helper exposed to adapter implementations: read kAXTitleAttribute on the
+/// focused window. Used as the default `focusedTitle` and as a fallback by
+/// adapters that combine it with other signals.
+fileprivate func defaultFocusedWindowTitle(appElement: AXUIElement) -> String? {
+    var winObj: AnyObject?
+    guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &winObj) == .success,
+          let raw = winObj,
+          CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+    let win = raw as! AXUIElement
+    var titleObj: AnyObject?
+    guard AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &titleObj) == .success else { return nil }
+    return titleObj as? String
+}
+
+struct DefaultTerminalAdapter: TerminalAdapter {
+    let bundleID: String
+}
+
+/// Apple Terminal exposes the focused tab's tty via AppleScript.
+/// First call may prompt for Automation permission (System Settings → Privacy
+/// & Security → Automation → TermIMS → Terminal). If denied, returns nil and
+/// matching falls back to the generic heuristic.
+struct AppleTerminalAdapter: TerminalAdapter {
+    let bundleID = "com.apple.Terminal"
+
+    // Apple Terminal is single-instance (one process per user). The
+    // AppleScript `front window` always points to the frontmost window,
+    // so we don't need to filter by appPid.
+    func focusedTty(appPid: pid_t) -> dev_t? {
+        let script = """
+        tell application "Terminal"
+            try
+                return tty of selected tab of front window
+            on error errMsg
+                return "ERR:" & errMsg
+            end try
+        end tell
+        """
+        guard let s = NSAppleScript(source: script) else {
+            Log.debug("APPLESCRIPT init failed")
+            return nil
+        }
+        var err: NSDictionary?
+        let descriptor = s.executeAndReturnError(&err)
+        if let err = err {
+            Log.debug("APPLESCRIPT exec error: \(err)")
+            return nil
+        }
+        guard let path = descriptor.stringValue else {
+            Log.debug("APPLESCRIPT no string result")
+            return nil
+        }
+        if path.hasPrefix("ERR:") {
+            Log.debug("APPLESCRIPT terminal error: \(path)")
+            return nil
+        }
+        guard !path.isEmpty else { return nil }
+        let name = (path as NSString).lastPathComponent
+        let dev = FocusMonitor.ttyDev(forName: name)
+        Log.debug("APPLESCRIPT Apple-Terminal tty=\(path) dev=\(dev.map(String.init(describing:)) ?? "nil")")
+        return dev
+    }
+}
+
+/// iTerm2 exposes the focused pane's tty via AppleScript. Object model is
+/// window → tab → session(s); the "current session of current window" is
+/// the focused pane (handles split panes correctly because iTerm2 tracks
+/// pane focus inside each tab).
+struct ITerm2Adapter: TerminalAdapter {
+    let bundleID = "com.googlecode.iterm2"
+
+    func focusedTty(appPid: pid_t) -> dev_t? {
+        let script = """
+        tell application "iTerm"
+            try
+                return tty of current session of current window
+            on error errMsg
+                return "ERR:" & errMsg
+            end try
+        end tell
+        """
+        guard let s = NSAppleScript(source: script) else {
+            Log.debug("ITERM2 init failed")
+            return nil
+        }
+        var err: NSDictionary?
+        let descriptor = s.executeAndReturnError(&err)
+        if let err = err {
+            Log.debug("ITERM2 exec error: \(err)")
+            return nil
+        }
+        guard let path = descriptor.stringValue else {
+            Log.debug("ITERM2 no string result")
+            return nil
+        }
+        if path.hasPrefix("ERR:") {
+            Log.debug("ITERM2 script error: \(path)")
+            return nil
+        }
+        guard !path.isEmpty else { return nil }
+        let name = (path as NSString).lastPathComponent
+        let dev = FocusMonitor.ttyDev(forName: name)
+        Log.debug("APPLESCRIPT iTerm2 tty=\(path) dev=\(dev.map(String.init(describing:)) ?? "nil")")
+        return dev
+    }
+}
+
+/// Locates a sibling binary inside a running app's bundle, e.g. resolving
+/// `kitten` to `/Applications/kitty.app/Contents/MacOS/kitten`. Needed because
+/// GUI-launched processes inherit a minimal PATH that often misses Homebrew /
+/// `/usr/local/bin`, so we can't rely on bare command names.
+fileprivate func resolveSiblingBinary(bundleID: String, name: String) -> String? {
+    guard let app = NSWorkspace.shared.runningApplications
+            .first(where: { $0.bundleIdentifier == bundleID }),
+          let url = app.bundleURL else { return nil }
+    let candidate = url.appendingPathComponent("Contents/MacOS/\(name)").path
+    return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
+}
+
+/// Run a short-lived subprocess and return its stdout as Data, or nil on
+/// failure / non-zero exit. Bounded by a timeout — focus handlers run on
+/// the main queue so we cannot block long. On failure, stderr is appended
+/// to the debug log to make diagnosis straightforward.
+fileprivate func runCommand(_ executable: String, args: [String], timeout: TimeInterval = 2.0) -> Data? {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: executable)
+    proc.arguments = args
+    let outPipe = Pipe(); let errPipe = Pipe()
+    proc.standardOutput = outPipe
+    proc.standardError  = errPipe
+    do { try proc.run() } catch {
+        Log.debug("CMD launch failed: \(executable) \(args) err=\(error)")
+        return nil
+    }
+    let deadline = Date().addingTimeInterval(timeout)
+    while proc.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    if proc.isRunning {
+        proc.terminate()
+        Log.debug("CMD timeout: \(executable) \(args)")
+        return nil
+    }
+    guard proc.terminationStatus == 0 else {
+        let errOut = (try? errPipe.fileHandleForReading.readToEnd()).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        Log.debug("CMD exit \(proc.terminationStatus): \(executable) \(args) stderr=\(errOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        return nil
+    }
+    return try? outPipe.fileHandleForReading.readToEnd()
+}
+
+/// Wezterm: `wezterm cli list-clients` gives the focused_pane_id; `wezterm cli list`
+/// maps pane_id → tty_name. Two short-lived subprocess calls per focus event.
+struct WezTermAdapter: TerminalAdapter {
+    let bundleID = "com.github.wez.wezterm"
+
+    func focusedTty(appPid: pid_t) -> dev_t? {
+        guard let bin = resolveSiblingBinary(bundleID: bundleID, name: "wezterm") else {
+            Log.debug("WEZTERM binary not found")
+            return nil
+        }
+        guard let clientsData = runCommand(bin, args: ["cli", "list-clients", "--format", "json"]),
+              let clients = try? JSONSerialization.jsonObject(with: clientsData) as? [[String: Any]] else {
+            Log.debug("WEZTERM list-clients failed")
+            return nil
+        }
+        // Multiple wezterm-gui instances all connect to the same mux daemon
+        // and appear as separate clients here. Match by appPid to find the
+        // client driven by the focused window; fall back to the first one
+        // if no client carries a matching pid (older wezterm versions).
+        let client = clients.first { ($0["pid"] as? Int) == Int(appPid) } ?? clients.first
+        guard let focusedPaneID = client?["focused_pane_id"] as? Int else {
+            Log.debug("WEZTERM no focused_pane_id for pid=\(appPid)")
+            return nil
+        }
+        guard let panesData = runCommand(bin, args: ["cli", "list", "--format", "json"]),
+              let panes = try? JSONSerialization.jsonObject(with: panesData) as? [[String: Any]],
+              let pane = panes.first(where: { ($0["pane_id"] as? Int) == focusedPaneID }),
+              let ttyName = pane["tty_name"] as? String else {
+            Log.debug("WEZTERM no pane match for id=\(focusedPaneID)")
+            return nil
+        }
+        let leaf = (ttyName as NSString).lastPathComponent
+        let dev = FocusMonitor.ttyDev(forName: leaf)
+        Log.debug("WEZTERM tty=\(ttyName) dev=\(dev.map(String.init(describing:)) ?? "nil")")
+        return dev
+    }
+}
+
+/// Kitty: `kitten @ ls` returns nested JSON (OS-windows → tabs → windows).
+/// Recurse into the focused chain to find the focused inner window's pid,
+/// then look up its tdev. Requires both `allow_remote_control yes` and an
+/// explicit `listen_on unix:/path/...` in kitty.conf so external processes
+/// know which socket to talk to.
+struct KittyAdapter: TerminalAdapter {
+    let bundleID = "net.kovidgoyal.kitty"
+    // kitty renders panes inside a single AX window; intra-window split
+    // focus changes only fire title-change notifications, not focus-element.
+    var needsTitleChangeNotification: Bool { true }
+
+    func focusedTty(appPid: pid_t) -> dev_t? {
+        guard let bin = resolveSiblingBinary(bundleID: bundleID, name: "kitten") else {
+            Log.debug("KITTY kitten binary not found")
+            return nil
+        }
+        var args = ["@", "ls"]
+        if let socket = Self.resolveSocket(kittyPid: appPid) {
+            args = ["@", "--to", socket, "ls"]
+        }
+        guard let data = runCommand(bin, args: args),
+              let osWindows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            Log.debug("KITTY @ ls failed (check allow_remote_control + listen_on in kitty.conf)")
+            return nil
+        }
+        guard let pid = Self.focusedWindowPid(in: osWindows) else {
+            Log.debug("KITTY no focused window in JSON")
+            return nil
+        }
+        guard let dev = ttyDevForPid(pid_t(pid)) else {
+            Log.debug("KITTY pid=\(pid) has no tdev")
+            return nil
+        }
+        Log.debug("KITTY pid=\(pid) dev=\(dev)")
+        return dev
+    }
+
+    /// Walk OS-window → tab → window picking the entry with `is_focused = true`
+    /// at each level. Falls back to first available if any level lacks the flag.
+    private static func focusedWindowPid(in osWindows: [[String: Any]]) -> Int? {
+        let osWin = osWindows.first(where: { ($0["is_focused"] as? Bool) == true }) ?? osWindows.first
+        guard let tabs = osWin?["tabs"] as? [[String: Any]] else { return nil }
+        let tab = tabs.first(where: { ($0["is_focused"] as? Bool) == true }) ?? tabs.first
+        guard let windows = tab?["windows"] as? [[String: Any]] else { return nil }
+        let win = windows.first(where: { ($0["is_focused"] as? Bool) == true }) ?? windows.first
+        return win?["pid"] as? Int
+    }
+
+    /// Parse the first `listen_on <value>` line from ~/.config/kitty/kitty.conf,
+    /// then resolve the actual socket path: kitty appends `-{pid}` to the
+    /// configured path (so `listen_on unix:/tmp/kitty` opens `/tmp/kitty-84629`).
+    /// `kittyPid` is the specific kitty instance whose focus event triggered
+    /// us — necessary when the user runs multiple kitty windows (each gets
+    /// its own socket file).
+    private static func resolveSocket(kittyPid: pid_t) -> String? {
+        let confPath = NSHomeDirectory() + "/.config/kitty/kitty.conf"
+        guard let content = try? String(contentsOfFile: confPath) else { return nil }
+        var declared: String?
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("listen_on") else { continue }
+            let parts = trimmed.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+            if parts.count == 2 {
+                declared = parts[1].trimmingCharacters(in: .whitespaces)
+                break
+            }
+        }
+        guard let socket = declared, socket.hasPrefix("unix:") else { return declared }
+        let rawPath = String(socket.dropFirst("unix:".count))
+        if FileManager.default.fileExists(atPath: rawPath) { return socket }
+        let withPid = "\(rawPath)-\(kittyPid)"
+        if FileManager.default.fileExists(atPath: withPid) {
+            return "unix:\(withPid)"
+        }
+        return socket  // best effort — kitten will report a clearer error
+    }
+}
+
+/// Resolves a pid to its controlling terminal's dev_t via sysctl.
+fileprivate func ttyDevForPid(_ pid: pid_t) -> dev_t? {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.size
+    guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return nil }
+    let tdev = info.kp_eproc.e_tdev
+    return tdev == 0 ? nil : tdev
+}
+
+enum TerminalAdapters {
+    static let all: [TerminalAdapter] = [
+        DefaultTerminalAdapter(bundleID: "com.mitchellh.ghostty"),
+        AppleTerminalAdapter(),
+        ITerm2Adapter(),
+        KittyAdapter(),
+        WezTermAdapter(),
+        DefaultTerminalAdapter(bundleID: "dev.warp.Warp-Stable"),
+    ]
+    private static let byBundleID: [String: TerminalAdapter] = Dictionary(
+        uniqueKeysWithValues: all.map { ($0.bundleID, $0) }
+    )
+    static func adapter(for bid: String) -> TerminalAdapter {
+        byBundleID[bid] ?? DefaultTerminalAdapter(bundleID: bid)
+    }
+}
+
+let terminalBundleIDs: Set<String> = Set(TerminalAdapters.all.map(\.bundleID))
 
 extension Notification.Name {
     static let rulesDidChange = Notification.Name("RulesDidChange")
     static let imDidSwitch    = Notification.Name("IMDidSwitch")
+}
+
+// MARK: - Title Heuristics
+//
+// Shared predicates used by terminals that fall through to the generic
+// matching path (no native tty channel). Both Ghostty (cwd-based path) and
+// Warp (descendant fallback) use these to ask the same two questions about
+// the focused window's title; the orchestration around them stays per-path
+// because the upstream signals differ (Ghostty has AXDocument cwd, Warp
+// doesn't).
+
+fileprivate extension String {
+    /// Does this title contain any of `processNames` as a case-insensitive
+    /// substring? Empty names never match.
+    func mentionsAny(of processNames: [String]) -> Bool {
+        let lower = self.lowercased()
+        return processNames.contains { !$0.isEmpty && lower.contains($0.lowercased()) }
+    }
+
+    /// Does this title look like it is displaying `cwd` (the focused tab's
+    /// own working directory)? Matches: the cwd's basename exactly, the
+    /// absolute path as substring, the tilde-collapsed form as substring,
+    /// and Ghostty's "…/tail/of/path" truncation. A title that mentions some
+    /// other path will not match — useful to distinguish a shell prompt
+    /// showing the tab's cwd from a foreground command title that happens
+    /// to contain unrelated paths.
+    func showsCwd(_ cwd: String) -> Bool {
+        guard !self.isEmpty else { return false }
+        let base = (cwd as NSString).lastPathComponent
+        if self == base { return true }
+        if self.contains(cwd) { return true }
+        let home = NSHomeDirectory()
+        if cwd.hasPrefix(home) {
+            let tilded = "~" + cwd.dropFirst(home.count)
+            if self.contains(tilded) { return true }
+        }
+        if self.hasPrefix("…"), cwd.hasSuffix(String(self.dropFirst())) { return true }
+        return false
+    }
+}
+
+// MARK: - Log
+//
+// Single-line append-only log gated by RuleStore.debugLogEnabled.
+// All log emission goes through `Log.debug(_:)` — call sites stay short
+// and unaware of file paths, timestamps, or the toggle.
+enum Log {
+    static let path: String = {
+        let dir = NSHomeDirectory() + "/Library/Logs/TermIMS"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir + "/termims.log"
+    }()
+
+    private static let formatter = ISO8601DateFormatter()
+    private static var handle: FileHandle? = openHandle()
+
+    private static func openHandle() -> FileHandle? {
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        let fh = FileHandle(forWritingAtPath: path)
+        fh?.seekToEndOfFile()
+        return fh
+    }
+
+    static func debug(_ msg: @autoclosure () -> String) {
+        guard RuleStore.shared.debugLogEnabled else { return }
+        if handle == nil { handle = openHandle() }
+        guard let fh = handle else { return }
+        let line = "[\(formatter.string(from: Date()))] \(msg())\n"
+        guard let data = line.data(using: .utf8) else { return }
+        fh.write(data)
+    }
+
+    static func clear() {
+        try? handle?.close()
+        handle = nil
+        try? FileManager.default.removeItem(atPath: path)
+    }
 }
 
 // MARK: - Rule Store
@@ -132,6 +540,11 @@ class RuleStore {
     var hideMenuBarIcon: Bool {
         get { ud.bool(forKey: "HideMenuBarIcon") }
         set { ud.set(newValue, forKey: "HideMenuBarIcon"); notify() }
+    }
+
+    var debugLogEnabled: Bool {
+        get { ud.bool(forKey: "DebugLogEnabled") }
+        set { ud.set(newValue, forKey: "DebugLogEnabled") }
     }
 
     var terminalRules: [TerminalRule] {
@@ -285,21 +698,28 @@ class FocusMonitor {
 
     private func resolveInputSource(for bid: String) -> String? {
         let store = RuleStore.shared
+        let result: (String?, String)
         if isTerminalWithRules(bid) {
             if let matched = matchTerminalRule(bid: bid, store: store) {
-                return matched
+                result = (matched, "terminal-rule")
+            } else if let termDefault = store.terminalDefaultSourceID {
+                result = (termDefault, "terminal-default")
+            } else if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
+                result = (rule.inputSourceID, "app-rule")
+            } else {
+                result = (store.defaultSourceID, "global-default")
             }
-            if let termDefault = store.terminalDefaultSourceID {
-                return termDefault
-            }
+        } else if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
+            result = (rule.inputSourceID, "app-rule")
+        } else {
+            result = (store.defaultSourceID, "global-default")
         }
-        if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
-            return rule.inputSourceID
-        }
-        return store.defaultSourceID
+        Log.debug("MATCH RESULT bid=\(bid) source=\(result.0 ?? "nil") via=\(result.1)")
+        return result.0
     }
 
     private func matchTerminalRule(bid: String, store: RuleStore) -> String? {
+        Log.debug("MATCH START bid=\(bid)")
         let rules = store.terminalRules.filter(\.enabled)
         guard !rules.isEmpty else { return nil }
 
@@ -310,19 +730,26 @@ class FocusMonitor {
             for rule in titleRules {
                 if !rule.pattern.isEmpty &&
                    title.localizedCaseInsensitiveContains(rule.pattern) {
+                    Log.debug("TITLE RULE HIT: pattern=\(rule.pattern) title=\(title)")
                     return rule.inputSourceID
                 }
             }
         }
 
         if !processRules.isEmpty {
-            let procs = getTerminalForegroundProcesses(bid: bid)
-            for rule in processRules {
-                if !rule.pattern.isEmpty &&
-                   procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) }) {
-                    return rule.inputSourceID
+            let candidates = getTerminalCandidateProcesses(bid: bid)
+            let titleForLog = getFocusedWindowTitle(bid: bid) ?? ""
+            Log.debug("PROCESS MATCH: title=\(titleForLog) candidates=\(candidates) rules=\(processRules.map { "\($0.pattern)" })")
+            for (i, procs) in candidates.enumerated() {
+                for rule in processRules {
+                    if !rule.pattern.isEmpty &&
+                       procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) }) {
+                        Log.debug("PROCESS RULE HIT: idx=\(i) procs=\(procs) pattern=\(rule.pattern)")
+                        return rule.inputSourceID
+                    }
                 }
             }
+            Log.debug("PROCESS RULE MISS: no match in \(candidates.count) candidates")
         }
 
         return nil
@@ -333,24 +760,38 @@ class FocusMonitor {
     private func getFocusedWindow(bid: String) -> AXUIElement? {
         guard let el = elements[bid] else { return nil }
         var win: AnyObject?
-        guard AXUIElementCopyAttributeValue(el, kAXFocusedWindowAttribute as CFString, &win) == .success else { return nil }
-        return (win as! AXUIElement)
+        guard AXUIElementCopyAttributeValue(el, kAXFocusedWindowAttribute as CFString, &win) == .success,
+              let raw = win,
+              CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        return (raw as! AXUIElement)
     }
 
     private func getFocusedWindowTitle(bid: String) -> String? {
-        guard let win = getFocusedWindow(bid: bid) else { return nil }
-        var val: AnyObject?
-        guard AXUIElementCopyAttributeValue(win, kAXTitleAttribute as CFString, &val) == .success else { return nil }
-        return val as? String
+        guard let app = elements[bid] else { return nil }
+        return TerminalAdapters.adapter(for: bid).focusedTitle(appElement: app)
     }
 
-    private func getFocusedWindowCWD(bid: String) -> String? {
+    private struct TabInfo { let cwd: String; let tty: dev_t? }
+
+    private func getFocusedTabInfo(bid: String) -> TabInfo? {
         guard let win = getFocusedWindow(bid: bid) else { return nil }
         var val: AnyObject?
         guard AXUIElementCopyAttributeValue(win, kAXDocumentAttribute as CFString, &val) == .success,
               let urlStr = val as? String,
               let url = URL(string: urlStr) else { return nil }
-        return url.path
+        Log.debug("AXDocument raw=\(urlStr)")
+        let path = url.path
+        guard !path.isEmpty else { return nil }
+        let tty = URLComponents(string: urlStr)?.queryItems?
+            .first(where: { $0.name == "tty" })?.value
+            .flatMap { Self.ttyDev(forName: $0) }
+        return TabInfo(cwd: path, tty: tty)
+    }
+
+    fileprivate static func ttyDev(forName name: String) -> dev_t? {
+        var st = stat()
+        guard lstat("/dev/" + name, &st) == 0 else { return nil }
+        return st.st_rdev
     }
 
     // MARK: Process Helpers
@@ -375,11 +816,15 @@ class FocusMonitor {
         }
     }
 
-    private func getTerminalForegroundProcesses(bid: String) -> [String] {
-        guard let app = NSWorkspace.shared.runningApplications
-                .first(where: { $0.bundleIdentifier == bid }) else { return [] }
+    private func getTerminalCandidateProcesses(bid: String) -> [[String]] {
+        // When the user runs multiple instances of the same terminal app
+        // (e.g. several kitty windows, each a separate process), prefer the
+        // currently active one — that's the instance whose focus event
+        // brought us here. Falls back to first match for safety.
+        let apps = NSWorkspace.shared.runningApplications
+        guard let app = apps.first(where: { $0.bundleIdentifier == bid && $0.isActive })
+                ?? apps.first(where: { $0.bundleIdentifier == bid }) else { return [] }
         let termPid = app.processIdentifier
-        guard let tabCWD = getFocusedWindowCWD(bid: bid) else { return [] }
 
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
         var size: Int = 0
@@ -412,6 +857,90 @@ class FocusMonitor {
             }
         }
 
+        // 1. Native tty (Apple Terminal AppleScript, kitty/wezterm CLI). Works
+        //    without AXDocument — required for terminals that don't expose cwd.
+        if let tty = TerminalAdapters.adapter(for: bid).focusedTty(appPid: termPid) {
+            // All processes on this tty, not just the foreground process group.
+            // Foreground flips when cc/claude spawns tool subprocesses (bash,
+            // grep, ...) — but `claude` is still alive on the tty, so a full
+            // listing keeps the claude rule matching during "thinking" pauses.
+            let procs = entries.filter { descendants.contains($0.pid) && $0.tdev == tty }.map(\.comm)
+            Log.debug("TTY DIRECT: tty=\(tty) source=native procs=\(procs)")
+            return procs.isEmpty ? [] : [procs]
+        }
+
+        // 2. OSC 7 query tty (shell hook) — needs AXDocument.
+        let tabInfo = getFocusedTabInfo(bid: bid)
+        if let tty = tabInfo?.tty {
+            let procs = entries.filter { descendants.contains($0.pid) && $0.tdev == tty }.map(\.comm)
+            Log.debug("TTY DIRECT: tty=\(tty) source=osc7 procs=\(procs)")
+            return procs.isEmpty ? [] : [procs]
+        }
+
+        // 3. No cwd from AXDocument either (Alacritty and similar minimal
+        //    terminals). Return foreground processes of every tty under the
+        //    app's process tree. If multiple ttys exist (e.g. several
+        //    Alacritty windows sharing one process), try to narrow to the
+        //    focused one by matching the AXTitle against fg process names —
+        //    Alacritty's title tracks the focused window's running command.
+        guard let tabCWD = tabInfo?.cwd else {
+            var byTty: [dev_t: [String]] = [:]
+            var shellPidPerTty: [dev_t: Int32] = [:]
+            let shellNamesFallback: Set<String> = ["zsh", "bash", "fish", "login"]
+            for e in entries where descendants.contains(e.pid) && e.tdev != 0 {
+                if e.isFg {
+                    byTty[e.tdev, default: []].append(e.comm)
+                }
+                if shellNamesFallback.contains(e.comm) {
+                    shellPidPerTty[e.tdev] = e.pid
+                }
+            }
+            let rawTitle = getFocusedWindowTitle(bid: bid) ?? ""
+            if byTty.count > 1 {
+                // 1. Title literally names a fg process (e.g. "cc-connect",
+                //    "✳ Claude Code"). Catches Warp's cc/cc-connect tabs.
+                //    Shell process names are excluded so a title like
+                //    "Running zsh in foo" doesn't match every candidate.
+                for (_, procs) in byTty {
+                    let nonShellOnly = procs.filter { !shellNamesFallback.contains($0) }
+                    if rawTitle.mentionsAny(of: nonShellOnly) {
+                        Log.debug("DESCENDANT FALLBACK: title=\(rawTitle) proc-match → \(procs)")
+                        return [procs]
+                    }
+                }
+
+                // 2. Title is a bare path (Warp tags idle shell tabs with
+                //    their cwd). Match against each candidate shell's cwd
+                //    to pick the focused one. When multiple ttys share the
+                //    cwd, prefer the one whose fg is only a shell — a
+                //    bare-cwd title means the user is at a prompt, not
+                //    running a foreground command. Gate on `~`/`/` prefix
+                //    so titles like "bwg-us:~" (ssh tab) don't false-match.
+                if rawTitle.hasPrefix("~") || rawTitle.hasPrefix("/") {
+                    let expanded = (rawTitle as NSString).expandingTildeInPath
+                    var matches: [(dev_t, [String])] = []
+                    for (tdev, procs) in byTty {
+                        guard let pid = shellPidPerTty[tdev],
+                              let cwd = processCWD(pid) else { continue }
+                        if cwd == expanded { matches.append((tdev, procs)) }
+                    }
+                    if let shellOnly = matches.first(where: { (_, procs) in
+                        procs.allSatisfy { shellNamesFallback.contains($0) }
+                    }) {
+                        Log.debug("DESCENDANT FALLBACK: title=\(rawTitle) cwd+shell-only → \(shellOnly.1)")
+                        return [shellOnly.1]
+                    }
+                    if let first = matches.first {
+                        Log.debug("DESCENDANT FALLBACK: title=\(rawTitle) cwd-match \(expanded) → \(first.1)")
+                        return [first.1]
+                    }
+                }
+            }
+            let result = Array(byTty.values)
+            Log.debug("DESCENDANT FALLBACK: \(result.count) ttys title=\(rawTitle) (no narrowing)")
+            return result
+        }
+
         let shellNames: Set<String> = ["zsh", "bash", "fish", "login"]
         let shells = entries.filter { descendants.contains($0.pid) && $0.tdev != 0 && shellNames.contains($0.comm) }
 
@@ -427,6 +956,8 @@ class FocusMonitor {
 
         guard !candidateTdevs.isEmpty else { return [] }
 
+        // Per-tty foreground process list — used by the heuristics below
+        // (e.g. "is this tty currently idle at a shell prompt?").
         let fgByTty: [dev_t: [String]] = {
             var m: [dev_t: [String]] = [:]
             for e in entries where descendants.contains(e.pid) && e.isFg && e.tdev != 0 {
@@ -435,52 +966,52 @@ class FocusMonitor {
             return m
         }()
 
-        let tdev: dev_t
-        if candidateTdevs.count == 1 {
-            tdev = candidateTdevs[0]
-        } else {
-            let title = getFocusedWindowTitle(bid: bid) ?? ""
-            let cwdBase = URL(fileURLWithPath: tabCWD).lastPathComponent
-            let looksLikeShell = title.isEmpty
-                || title == cwdBase
-                || title.hasSuffix(cwdBase)
-                || title.hasPrefix("/")
-                || title.hasPrefix("~")
-                || shellNames.contains(title)
-
-            if looksLikeShell {
-                tdev = candidateTdevs.first(where: { td in
-                    (fgByTty[td] ?? []).allSatisfy { shellNames.contains($0) }
-                }) ?? candidateTdevs[0]
-            } else {
-                let nonShellTdevs = candidateTdevs.filter { td in
-                    (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
-                }
-                if nonShellTdevs.count > 1 {
-                    if let titleMatch = nonShellTdevs.first(where: { td in
-                        (fgByTty[td] ?? []).contains(where: { proc in
-                            !shellNames.contains(proc) && title.localizedCaseInsensitiveContains(proc)
-                        })
-                    }) {
-                        tdev = titleMatch
-                    } else {
-                        func mtime(_ d: dev_t) -> (Int, Int) {
-                            guard let n = devname(d, mode_t(S_IFCHR)) else { return (0, 0) }
-                            var sb = stat()
-                            guard lstat("/dev/" + String(cString: n), &sb) == 0 else { return (0, 0) }
-                            return (sb.st_mtimespec.tv_sec, sb.st_mtimespec.tv_nsec)
-                        }
-                        tdev = nonShellTdevs.max(by: { mtime($0) < mtime($1) }) ?? nonShellTdevs[0]
-                    }
-                } else {
-                    tdev = nonShellTdevs.first ?? candidateTdevs[0]
-                }
-            }
+        // Full process list per tty — used for what we hand to the rule
+        // matcher. Including non-fg processes keeps `claude` discoverable
+        // while cc spawns transient tool subprocesses that briefly own
+        // the foreground process group.
+        func ttyProcs(_ td: dev_t) -> [String] {
+            entries.filter { descendants.contains($0.pid) && $0.tdev == td }.map(\.comm)
         }
 
-        return entries
-            .filter { descendants.contains($0.pid) && $0.tdev == tdev && $0.isFg }
-            .map(\.comm)
+        if candidateTdevs.count == 1 {
+            return [ttyProcs(candidateTdevs[0])]
+        }
+
+        let title = getFocusedWindowTitle(bid: bid) ?? ""
+        // Shell prompt signal: title equals a bare shell name, or shows the
+        // focused tab's own cwd in any of the recognised forms.
+        let looksLikeShell = shellNames.contains(title) || title.showsCwd(tabCWD)
+
+        if looksLikeShell {
+            let tdev = candidateTdevs.first(where: { td in
+                (fgByTty[td] ?? []).allSatisfy { shellNames.contains($0) }
+            }) ?? candidateTdevs[0]
+            return [ttyProcs(tdev)]
+        }
+
+        let nonShellTdevs = candidateTdevs.filter { td in
+            (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
+        }
+        guard nonShellTdevs.count > 1 else {
+            return [ttyProcs(nonShellTdevs.first ?? candidateTdevs[0])]
+        }
+
+        // Multi non-shell candidates: try to single out the focused one by
+        // checking which candidate's fg process name appears in the window
+        // title. Works for terminals that auto-set the title to the running
+        // command (Ghostty, kitty, etc.) when several tabs share a cwd.
+        // Shell processes are excluded so a title like "Running zsh in foo"
+        // doesn't accidentally match every candidate (every tty has zsh).
+        for td in nonShellTdevs {
+            let procs = ttyProcs(td)
+            let nonShellOnly = procs.filter { !shellNames.contains($0) }
+            if title.mentionsAny(of: nonShellOnly) {
+                Log.debug("CWD MULTI title=\(title) → \(procs)")
+                return [procs]
+            }
+        }
+        return nonShellTdevs.map { ttyProcs($0) }
     }
 
     // MARK: Event Handlers
@@ -561,17 +1092,20 @@ class FocusMonitor {
         var notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
         if terminalBundleIDs.contains(bid) {
             notifs.append(kAXFocusedUIElementChangedNotification as CFString)
+            if TerminalAdapters.adapter(for: bid).needsTitleChangeNotification {
+                notifs.append(kAXTitleChangedNotification as CFString)
+            }
         }
         for name in notifs { AXObserverAddNotification(observer, el, name, ptr) }
-        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .defaultMode)
+        CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
     }
 
     private func detach(_ bid: String) {
         guard let obs = observers[bid], let el = elements[bid] else { return }
         let notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification,
-                      kAXFocusedUIElementChangedNotification] as [CFString]
+                      kAXFocusedUIElementChangedNotification, kAXTitleChangedNotification] as [CFString]
         for n in notifs { AXObserverRemoveNotification(obs, el, n) }
-        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .defaultMode)
+        CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(obs), .commonModes)
         observers.removeValue(forKey: bid)
         elements.removeValue(forKey: bid)
         contexts.removeValue(forKey: bid)
@@ -617,14 +1151,24 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         t2.view = buildAppRulesTab()
         let t3 = NSTabViewItem(identifier: "terminal"); t3.label = "Terminal Rules"
         t3.view = buildTerminalRulesTab()
+        let t4 = NSTabViewItem(identifier: "shell"); t4.label = "Shell Integration"
+        t4.view = buildShellIntegrationTab()
 
         tabView.addTabViewItem(t1)
         tabView.addTabViewItem(t2)
         tabView.addTabViewItem(t3)
+        tabView.addTabViewItem(t4)
 
         appTableView.dataSource = self; appTableView.delegate = self
         termTableView.dataSource = self; termTableView.delegate = self
+        appTableView.registerForDraggedTypes([Self.appRowDragType])
+        termTableView.registerForDraggedTypes([Self.termRowDragType])
+        appTableView.draggingDestinationFeedbackStyle = .gap
+        termTableView.draggingDestinationFeedbackStyle = .gap
     }
+
+    static let appRowDragType  = NSPasteboard.PasteboardType("top.cuiko.termims.app-rule-row")
+    static let termRowDragType = NSPasteboard.PasteboardType("top.cuiko.termims.term-rule-row")
 
     // MARK: General Tab
 
@@ -664,8 +1208,23 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         hideCheck.translatesAutoresizingMaskIntoConstraints = false
         hideCheck.state = store.hideMenuBarIcon ? .on : .off
 
+        let sep3 = separator()
+        let debugLabel = label("Debug")
+        debugLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        let debugCheck = NSButton(checkboxWithTitle: "Enable debug logging",
+                                  target: self, action: #selector(debugLogToggled(_:)))
+        debugCheck.translatesAutoresizingMaskIntoConstraints = false
+        debugCheck.state = store.debugLogEnabled ? .on : .off
+
+        let clearBtn = NSButton(title: "Clear Log", target: self, action: #selector(clearDebugLog(_:)))
+        clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        clearBtn.bezelStyle = .rounded
+        clearBtn.controlSize = .regular
+
         for sub in [defLabel, defPopup, sep1, indLabel, indCheck, posLabel, posPopup,
-                    sep2, appLabel, hideCheck] { v.addSubview(sub) }
+                    sep2, appLabel, hideCheck,
+                    sep3, debugLabel, debugCheck, clearBtn] { v.addSubview(sub) }
         NSLayoutConstraint.activate([
             defLabel.topAnchor.constraint(equalTo: v.topAnchor, constant: 20),
             defLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
@@ -695,6 +1254,17 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
             appLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
             hideCheck.topAnchor.constraint(equalTo: appLabel.bottomAnchor, constant: 10),
             hideCheck.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+
+            sep3.topAnchor.constraint(equalTo: hideCheck.bottomAnchor, constant: 20),
+            sep3.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
+            sep3.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -12),
+
+            debugLabel.topAnchor.constraint(equalTo: sep3.bottomAnchor, constant: 16),
+            debugLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            debugCheck.topAnchor.constraint(equalTo: debugLabel.bottomAnchor, constant: 10),
+            debugCheck.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            clearBtn.centerYAnchor.constraint(equalTo: debugCheck.centerYAnchor),
+            clearBtn.leadingAnchor.constraint(equalTo: debugCheck.trailingAnchor, constant: 12),
         ])
         return v
     }
@@ -716,6 +1286,116 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     }
     @objc private func hideIconToggled(_ sender: NSButton) {
         RuleStore.shared.hideMenuBarIcon = sender.state == .on
+    }
+    @objc private func debugLogToggled(_ sender: NSButton) {
+        RuleStore.shared.debugLogEnabled = sender.state == .on
+    }
+    @objc private func clearDebugLog(_ sender: NSButton) {
+        Log.clear()
+    }
+
+    // MARK: Shell Integration Tab
+
+    private static let shellIntegrationSnippet = """
+    # TermIMS shell integration — write tty into OSC 7 so TermIMS can
+    # unambiguously map a focused terminal tab to its tty / foreground process.
+    # Works in bash and zsh. For fish, see the project README.
+    _termims_osc7() {
+      # Reorder self to last in precmd_functions so emitters running after us
+      # (e.g. Ghostty's own shell integration) can't overwrite our OSC 7.
+      if [ -n "$ZSH_VERSION" ]; then
+        precmd_functions=(${precmd_functions:#_termims_osc7} _termims_osc7)
+      fi
+      local t
+      t=$(tty 2>/dev/null) || return
+      printf '\\e]7;file://%s%s?tty=%s\\e\\\\' "${HOST:-$HOSTNAME}" "$PWD" "${t##*/}"
+    }
+    if [ -n "$ZSH_VERSION" ]; then
+      typeset -ag precmd_functions
+      precmd_functions+=(_termims_osc7)
+    else
+      PROMPT_COMMAND="${PROMPT_COMMAND%;}${PROMPT_COMMAND:+;}_termims_osc7"
+    fi
+    """
+
+    private func buildShellIntegrationTab() -> NSView {
+        let v = NSView()
+
+        let title = label("Shell Integration (optional)")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        let desc = NSTextField(wrappingLabelWithString:
+            "When multiple tabs share the same working directory, TermIMS can't tell them apart from CWD alone. " +
+            "Add this snippet to your shell rc (~/.zshrc or ~/.bashrc) and TermIMS will read the tty straight from " +
+            "the terminal's OSC 7 update — no heuristics, no title parsing.\n\n" +
+            "Note: Ghostty currently re-emits its own OSC 7 last in every prompt cycle, stripping any query " +
+            "parameters we add — so this hook has no effect inside Ghostty. It still helps in iTerm2, Terminal.app, " +
+            "Alacritty, and other terminals that pass OSC 7 through unchanged.")
+        desc.translatesAutoresizingMaskIntoConstraints = false
+        desc.font = .systemFont(ofSize: 12)
+        desc.textColor = .secondaryLabelColor
+
+        let tv = NSTextView()
+        tv.string = Self.shellIntegrationSnippet
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.textContainerInset = NSSize(width: 6, height: 6)
+        tv.drawsBackground = true
+        tv.backgroundColor = .textBackgroundColor
+
+        let sv = NSScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.hasVerticalScroller = true
+        sv.borderType = .lineBorder
+        sv.documentView = tv
+
+        let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyShellIntegration(_:)))
+        copyBtn.translatesAutoresizingMaskIntoConstraints = false
+        copyBtn.bezelStyle = .rounded
+        copyBtn.keyEquivalent = "\r"
+
+        let hint = NSTextField(wrappingLabelWithString:
+            "After pasting, open a new terminal tab (or run `source ~/.zshrc`) and switch into it. " +
+            "TermIMS will pick the tty automatically — even with several tabs in the same directory.")
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+
+        for sub in [title, desc, sv, copyBtn, hint] { v.addSubview(sub) }
+
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: v.topAnchor, constant: 16),
+            title.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+
+            desc.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            desc.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            desc.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+
+            sv.topAnchor.constraint(equalTo: desc.bottomAnchor, constant: 12),
+            sv.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            sv.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            sv.heightAnchor.constraint(equalToConstant: 220),
+
+            copyBtn.topAnchor.constraint(equalTo: sv.bottomAnchor, constant: 12),
+            copyBtn.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+
+            hint.centerYAnchor.constraint(equalTo: copyBtn.centerYAnchor),
+            hint.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            hint.trailingAnchor.constraint(equalTo: copyBtn.leadingAnchor, constant: -12),
+        ])
+        return v
+    }
+
+    @objc private func copyShellIntegration(_ sender: NSButton) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(Self.shellIntegrationSnippet, forType: .string)
+        let original = sender.title
+        sender.title = "Copied!"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            sender.title = original
+        }
     }
 
     // MARK: App Rules Tab
@@ -843,6 +1523,49 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         let colIM = NSTableColumn(identifier: .init("tim")); colIM.title = "Input Method"; colIM.width = 180; colIM.minWidth = 120
         tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM)
         sv.documentView = tv; return sv
+    }
+
+    // MARK: Table Drag Reordering
+
+    func tableView(_ tv: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        let item = NSPasteboardItem()
+        let type = (tv === termTableView) ? Self.termRowDragType : Self.appRowDragType
+        item.setString("\(row)", forType: type)
+        return item
+    }
+
+    func tableView(_ tv: NSTableView,
+                   validateDrop info: NSDraggingInfo,
+                   proposedRow row: Int,
+                   proposedDropOperation op: NSTableView.DropOperation) -> NSDragOperation {
+        guard op == .above else { return [] }
+        return .move
+    }
+
+    func tableView(_ tv: NSTableView,
+                   acceptDrop info: NSDraggingInfo,
+                   row: Int,
+                   dropOperation op: NSTableView.DropOperation) -> Bool {
+        let type = (tv === termTableView) ? Self.termRowDragType : Self.appRowDragType
+        guard let items = info.draggingPasteboard.pasteboardItems,
+              let str = items.first?.string(forType: type),
+              let src = Int(str), src != row, src != row - 1 else { return false }
+
+        if tv === termTableView {
+            var rules = RuleStore.shared.terminalRules
+            let dst = src < row ? row - 1 : row
+            let moved = rules.remove(at: src)
+            rules.insert(moved, at: dst)
+            RuleStore.shared.terminalRules = rules
+        } else {
+            var rules = RuleStore.shared.rules
+            let dst = src < row ? row - 1 : row
+            let moved = rules.remove(at: src)
+            rules.insert(moved, at: dst)
+            RuleStore.shared.rules = rules
+        }
+        tv.reloadData()
+        return true
     }
 
     // MARK: Table DataSource / Delegate
@@ -1161,6 +1884,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        Log.debug("=== TermIMS started ===")
         if AXIsProcessTrusted() {
             wasTrusted = true
             startApp()

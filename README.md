@@ -8,7 +8,7 @@
 
 - **Per-app input method rules** — Assign a specific input method to any application. When you switch to that app, the input method changes automatically.
 - **Terminal sub-rules** — For terminal emulators (Ghostty, Terminal.app, iTerm2, kitty, wezterm, Warp, Alacritty), define additional rules that match by:
-  - **Process name** — e.g., switch to Chinese when `claude` or `nvim` is running in the active tab or split pane
+  - **Process name** — e.g., switch input method when `claude` or `nvim` is running in the active tab or split pane
   - **Tab title** — e.g., match a keyword in the terminal window title
 - **Global default** — Set a fallback input method for apps without specific rules.
 - **Terminal default** — Set a separate default for terminal apps when no sub-rule matches.
@@ -19,12 +19,29 @@
 
 ## How It Works
 
-TermIMS uses the macOS Accessibility API to monitor application focus changes and terminal tab switches. For terminal process matching, it reads the kernel process table via `sysctl` and correlates the active tab using `AXDocument` (working directory) and `proc_pidinfo` — no shell plugins or terminal extensions required.
+TermIMS uses the macOS Accessibility API to monitor application focus changes and terminal tab switches. To map a focused tab to its foreground process, it goes through a small adapter layer that picks the most precise channel each terminal offers, then falls back to a generic working-directory + process-tree heuristic when no native channel exists.
+
+## Terminal Support
+
+Different terminals expose different signals about the focused tab. Status as of current testing:
+
+| Terminal | Channel | Status | Extra setup |
+|---|---|---|---|
+| Ghostty | `AXDocument` cwd + process-tree heuristic | Works for tabs in distinct working directories; multiple tabs sharing a cwd need a title rule to disambiguate | None |
+| Apple Terminal | AppleScript `tty of selected tab` | Works precisely for every tab | First launch macOS prompts for **Automation → Terminal** — accept it |
+| kitty | `kitten @ ls` JSON | Works precisely for every tab | Add `allow_remote_control yes` **and** `listen_on unix:/tmp/kitty` to `~/.config/kitty/kitty.conf` and restart kitty. The socket path can be anything — TermIMS reads `listen_on` from the same file. |
+| WezTerm | `wezterm cli list` JSON | Works precisely for every tab | None |
+| iTerm2 | AppleScript `tty of current session of current window` | Works precisely for every tab and split pane | First launch macOS prompts for **Automation → iTerm**; accept it |
+| Warp | Generic descendant-fallback heuristic | Best-effort. Warp does not currently expose its tabs to the macOS Accessibility tree (tracked upstream as [warpdotdev/warp#11160](https://github.com/warpdotdev/warp/issues/11160)) and does not ship AppleScript scripting ([#3364](https://github.com/warpdotdev/warp/issues/3364)) or a CLI query API. The window's AXTitle is stuck at whichever tab last emitted OSC 2, and the focused text area's AXValue spans the whole visible buffer — so when multiple tabs share a cwd, disambiguation is brittle. Workable for tabs in distinct cwds; multi-tab-same-cwd may misroute until Warp lands the upstream fix. | None |
+| Alacritty | Not supported | Alacritty is intentionally minimal — it doesn't expose cwd via AX, has no query CLI, and doesn't update its window title to track the running command. With multiple windows there's no reliable signal to disambiguate the focused one. Use a multiplexer (tmux) inside a single Alacritty window instead. | n/a |
+
+For terminals on the generic-heuristic path, if you put each tab in its own working directory things work out of the box. When multiple tabs share a directory the matcher can't tell them apart from cwd alone — add a **Tab Title** rule to disambiguate (title rules are checked before process rules).
 
 ## Requirements
 
 - macOS 13.0+
 - Accessibility permission (System Settings → Privacy & Security → Accessibility)
+- Automation permission for Apple Terminal and/or iTerm2 if you use them (System Settings → Privacy & Security → Automation → TermIMS → ...). macOS prompts on first focus event for each app — just accept.
 
 ## Install
 
@@ -66,11 +83,11 @@ make dist
 
 | Match        | Pattern  | Input Method |
 |--------------|----------|--------------|
-| Process Name | `claude` | Chinese      |
+| Process Name | `claude` | Pinyin       |
 | Process Name | `nvim`   | ABC          |
 | Tab Title    | `ssh`    | ABC          |
 
-When you switch to a Ghostty tab running `claude`, TermIMS detects the foreground process and switches to Chinese. Switch to a plain shell tab and it reverts to the terminal default.
+When you switch to a Ghostty tab running `claude`, TermIMS detects the foreground process and switches to the configured input method. Switch to a plain shell tab and it reverts to the terminal default.
 
 ---
 
