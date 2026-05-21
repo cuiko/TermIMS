@@ -917,22 +917,25 @@ class FocusMonitor {
 
         let title = getFocusedWindowTitle(bid: bid) ?? ""
         let cwdBase = URL(fileURLWithPath: tabCWD).lastPathComponent
-        // Empty title is usually a transient state during command lifecycle
-        // (Ghostty briefly clears title while a process starts/exits) — don't
-        // treat it as a shell-prompt signal, or we'll flap to ABC mid-command.
-        // `hasSuffix(cwdBase)` is intentionally NOT used: cc's spinner titles
-        // like "⠂ TermIMS" would otherwise be mistaken for shell prompts and
-        // route the cc tab to a sibling zsh tty.
-        // "…/path" is Ghostty's truncated-path form for shell prompts when
-        // the cwd is too long to fit the title bar. Treat it the same as a
-        // bare absolute or home-relative path.
-        let looksLikeShell = !title.isEmpty && (
-            title == cwdBase
-            || title.hasPrefix("/")
-            || title.hasPrefix("~")
-            || title.hasPrefix("…")
-            || shellNames.contains(title)
-        )
+        // "Looks like a shell prompt" = the title is showing this tab's own
+        // cwd in some shape (basename, absolute path, tilde-collapsed,
+        // Ghostty's "…/" truncation, or wrapped inside a prompt theme like
+        // `(main) ~/path`). We deliberately do NOT use a broad `contains("/")`
+        // — a cc summary like "Running zsh in ~/foo" carries an unrelated
+        // path and would otherwise misroute the cc tab to a sibling shell.
+        let home = NSHomeDirectory()
+        let tildeCwd = tabCWD.hasPrefix(home) ? "~" + tabCWD.dropFirst(home.count) : tabCWD
+        let looksLikeShell: Bool = {
+            guard !title.isEmpty else { return false }
+            if title == cwdBase { return true }
+            if shellNames.contains(title) { return true }
+            if title.contains(tabCWD) { return true }
+            if title.contains(tildeCwd) { return true }
+            // Ghostty truncates long paths to "…/tail/of/path"; check that
+            // the post-ellipsis substring is a suffix of the cwd.
+            if title.hasPrefix("…"), tabCWD.hasSuffix(String(title.dropFirst())) { return true }
+            return false
+        }()
 
         if looksLikeShell {
             let tdev = candidateTdevs.first(where: { td in
