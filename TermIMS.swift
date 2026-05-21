@@ -444,6 +444,31 @@ extension Notification.Name {
 // doesn't).
 
 fileprivate extension String {
+    /// Match self against a user-supplied rule pattern.
+    /// `/body/` or `/body/i` is treated as an ICU regex (case-insensitive
+    /// with `i`); anything else is a case-insensitive substring match.
+    /// Patterns missing the closing slash, with empty body, or with
+    /// unknown flags fall back to literal substring so users can still
+    /// match strings like "/usr/bin/foo" without escaping.
+    func matches(pattern: String) -> Bool {
+        guard !pattern.isEmpty else { return false }
+        if pattern.count >= 2, pattern.first == "/",
+           let lastSlash = pattern.lastIndex(of: "/"),
+           lastSlash != pattern.startIndex {
+            let flagsStr = pattern[pattern.index(after: lastSlash)...]
+            let body = pattern[pattern.index(after: pattern.startIndex)..<lastSlash]
+            if !body.isEmpty, flagsStr.allSatisfy({ $0 == "i" }) {
+                var opts: NSRegularExpression.Options = []
+                if flagsStr.contains("i") { opts.insert(.caseInsensitive) }
+                if let re = try? NSRegularExpression(pattern: String(body), options: opts) {
+                    let range = NSRange(self.startIndex..., in: self)
+                    return re.firstMatch(in: self, range: range) != nil
+                }
+            }
+        }
+        return self.localizedCaseInsensitiveContains(pattern)
+    }
+
     /// Does this title contain any of `processNames` as a case-insensitive
     /// substring? Empty names never match.
     func mentionsAny(of processNames: [String]) -> Bool {
@@ -736,9 +761,8 @@ class FocusMonitor {
         let processRules = rules.filter { $0.matchType == .process }
 
         if !titleRules.isEmpty, let title = getFocusedWindowTitle(bid: bid) {
-            for rule in titleRules {
-                if !rule.pattern.isEmpty &&
-                   title.localizedCaseInsensitiveContains(rule.pattern) {
+            for rule in titleRules where !rule.pattern.isEmpty {
+                if title.matches(pattern: rule.pattern) {
                     Log.debug("TITLE RULE HIT: pattern=\(rule.pattern) title=\(title)")
                     return rule.inputSourceID
                 }
@@ -759,7 +783,7 @@ class FocusMonitor {
             let hits: [TerminalRule?] = candidates.map { procs in
                 processRules.first(where: { rule in
                     !rule.pattern.isEmpty &&
-                    procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) })
+                    procs.contains(where: { $0.matches(pattern: rule.pattern) })
                 })
             }
             if let firstHit = hits.first ?? nil,

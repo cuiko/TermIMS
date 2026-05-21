@@ -83,13 +83,17 @@ make dist
 
 ### Terminal Rules Example
 
-| Match        | Pattern  | Input Method |
-|--------------|----------|--------------|
-| Process Name | `claude` | Pinyin       |
-| Process Name | `nvim`   | ABC          |
-| Tab Title    | `ssh`    | ABC          |
+| Match        | Pattern         | Input Method |
+|--------------|-----------------|--------------|
+| Tab Title    | `/^[⠁-⣿✳] /`    | Pinyin       |
+| Tab Title    | `ssh`           | ABC          |
+| Process Name | `nvim`          | ABC          |
 
-When you switch to a Ghostty tab running `claude`, TermIMS detects the foreground process and switches to the configured input method. Switch to a plain shell tab and it reverts to the terminal default.
+Patterns are case-insensitive substrings by default. Wrap with slashes (`/pattern/`, append `i` for case-insensitive) to use a regex.
+
+#### Why the Claude rule uses a title regex
+
+`Process Name = claude` mis-fires when several Ghostty/Warp tabs share a working directory — TermIMS can't pin focus to one tty from cwd alone, so a sibling tab running `claude` triggers the rule on the focused (non-Claude) tab. Claude Code rewrites the terminal title to `⠂ <summary>` while thinking (Braille spinner, U+2801–U+28FF) and `✳ <summary>` when idle; `/^[⠁-⣿✳] /` catches both forms and only matches a focused Claude tab. The same trick works for any tool with a distinctive title prefix.
 
 ## Uninstall
 
