@@ -6,22 +6,15 @@
 
 ## Features
 
-- **Per-app input method rules** — Assign a specific input method to any application. When you switch to that app, the input method changes automatically.
-- **Terminal sub-rules** — For terminal emulators (Ghostty, Terminal.app, iTerm2, kitty, WezTerm, Warp), define additional rules that match by:
-  - **Process name** — e.g., switch input method when `claude` or `nvim` is running in the active tab or split pane
-  - **Tab title** — e.g., match a keyword in the terminal window title
-- **Drag-and-drop rule ordering** — Reorder App Rules and Terminal Rules in Settings. Order matters: title rules run before process rules, and within each type the first match wins.
-- **Global default** — Set a fallback input method for apps without specific rules.
-- **Terminal default** — Set a separate default for terminal apps when no sub-rule matches.
-- **Debug logging** — Toggle a single-line append-only log at `~/Library/Logs/TermIMS/termims.log` from Settings → General → Debug, with a one-click Clear button.
-- **Switch indicator** — A brief overlay shows the current input method on switch. Configurable position (center, corners) and can be disabled.
-- **Launch at Login** — Optional LaunchAgent-based auto-start.
-- **Hide menu bar icon** — Run silently without a status bar icon. Reopen the app to access Settings.
-- **Permission handling** — Guides you through granting Accessibility permission on first launch, and detects if permission is revoked.
+- **Per-app input method rules** — switch input methods when the focused app changes.
+- **Terminal sub-rules** — match by process name or tab title for Ghostty, Apple Terminal, iTerm2, kitty, WezTerm, Warp. Patterns are case-insensitive substrings; wrap with `/.../` for regex.
+- **Defaults** — global fallback plus a separate terminal default when no sub-rule matches.
+- **Drag-and-drop ordering** — title rules run before process rules; within each type the first match wins.
+- **Switch indicator** — brief on-screen overlay showing the new input method, with configurable position.
 
 ## How It Works
 
-TermIMS uses the macOS Accessibility API to monitor application focus changes and terminal tab switches. To map a focused tab to its foreground process, it goes through a small `TerminalAdapter` strategy layer that picks the most precise channel each terminal offers — AppleScript for Apple Terminal and iTerm2, the bundled CLI for kitty and WezTerm, AX cwd for Ghostty — and falls back to a generic process-tree + working-directory heuristic when no native channel exists.
+TermIMS uses the macOS Accessibility API to watch app focus and terminal tab changes. It picks the most precise channel each terminal exposes — AppleScript for Apple Terminal and iTerm2, the bundled CLI for kitty and WezTerm, AX cwd for Ghostty — and falls back to a process-tree + working-directory heuristic otherwise.
 
 ## Terminal Support
 
@@ -34,10 +27,19 @@ Different terminals expose different signals about the focused tab. Status as of
 | kitty | `kitten @ ls` JSON | Works precisely for every tab | Add `allow_remote_control yes` **and** `listen_on unix:/tmp/kitty` to `~/.config/kitty/kitty.conf` and restart kitty. The socket path can be anything — TermIMS reads `listen_on` from the same file. |
 | WezTerm | `wezterm cli list` JSON | Works precisely for every tab | None |
 | iTerm2 | AppleScript `tty of current session of current window` | Works precisely for every tab and split pane | First launch macOS prompts for **Automation → iTerm**; accept it |
-| Warp | Generic descendant-fallback heuristic | Best-effort. Warp does not currently expose its tabs to the macOS Accessibility tree (tracked upstream as [warpdotdev/warp#11160](https://github.com/warpdotdev/warp/issues/11160)) and does not ship AppleScript scripting ([#3364](https://github.com/warpdotdev/warp/issues/3364)) or a CLI query API. The window's AXTitle is stuck at whichever tab last emitted OSC 2, and the focused text area's AXValue spans the whole visible buffer — so when multiple tabs share a cwd, disambiguation is brittle. Workable for tabs in distinct cwds; multi-tab-same-cwd may misroute until Warp lands the upstream fix. | None |
-| Alacritty | Not supported | Alacritty is intentionally minimal — it doesn't expose cwd via AX, has no query CLI, and doesn't update its window title to track the running command. With multiple windows there's no reliable signal to disambiguate the focused one. Use a multiplexer (tmux) inside a single Alacritty window instead. | n/a |
+| Warp | Process-tree heuristic | Best-effort. Warp doesn't expose tabs to AX ([#11160](https://github.com/warpdotdev/warp/issues/11160)) and ships no AppleScript ([#3364](https://github.com/warpdotdev/warp/issues/3364)) or query CLI, so when multiple tabs share a cwd disambiguation is brittle. | None |
+| Alacritty | Not supported | No AX cwd, no query CLI, title doesn't track the running command. Use tmux inside a single window. | n/a |
 
-For terminals on the generic-heuristic path, if you put each tab in its own working directory things work out of the box. When multiple tabs share a directory the matcher can't tell them apart from cwd alone — add a **Tab Title** rule to disambiguate (title rules are checked before process rules).
+On the generic-heuristic path, each tab in its own working directory works out of the box. When tabs share a directory the matcher can't tell them apart from cwd alone — add a **Tab Title** rule to disambiguate.
+
+### tmux (and other multiplexers)
+
+tmux runs every pane on its own pty under the `tmux` server, which macOS can't see into — the terminal's tty foreground process is always `tmux`, so Process Name rules for commands inside tmux won't match. Push the active pane's command into the title and use a **Tab Title** rule instead:
+
+```tmux
+set -g set-titles on
+set -g set-titles-string "#{pane_current_command}"
+```
 
 ## Requirements
 
@@ -95,15 +97,13 @@ Patterns are case-insensitive substrings by default. Wrap with slashes (`/patter
 
 `Process Name = claude` mis-fires when several Ghostty/Warp tabs share a working directory — TermIMS can't pin focus to one tty from cwd alone, so a sibling tab running `claude` triggers the rule on the focused (non-Claude) tab. Claude Code rewrites the terminal title to `⠂ <summary>` while thinking (Braille spinner, U+2801–U+28FF) and `✳ <summary>` when idle; `/^[⠁-⣿✳] /` catches both forms and only matches a focused Claude tab. The same trick works for any tool with a distinctive title prefix.
 
+### Process names vs. user-typed commands
+
+Process Name rules match the kernel-reported executable (`kp_proc.p_comm`), not the typed command. Many wrappers (`mole`, `cargo`, `bundle`, `mise`, `asdf`, …) `exec` into a different binary, so `mole analyze` shows up as `analyze-go`. Match the underlying binary, or use a Tab Title rule (shell `preexec` hooks usually put the typed command in the title).
+
 ## Uninstall
 
-Dragging `TermIMS.app` to the Trash only removes the bundle; the rules database, the launch agent (if you enabled Launch at Login), and the debug log stay behind. Run the bundled `uninstall.sh` from a fresh clone or from the DMG to clean everything up in one go:
-
-```sh
-./uninstall.sh
-```
-
-The script quits the app, removes `/Applications/TermIMS.app`, unloads the launch agent, deletes `~/Library/Logs/TermIMS`, the `top.cuiko.termims` UserDefaults plist, and any cached state. macOS does not let external scripts revoke privacy grants, so the last step — removing TermIMS from **System Settings → Privacy & Security → Accessibility** (and from **→ Automation** if you used Apple Terminal / iTerm2) — has to be done by hand.
+Trashing `TermIMS.app` only removes the bundle. Run `./uninstall.sh` (from a clone or the DMG) to also quit the app, unload the launch agent, and delete the UserDefaults plist, log directory, and caches. macOS doesn't let scripts revoke privacy grants — remove TermIMS from **System Settings → Privacy & Security → Accessibility** (and **→ Automation** if you used Apple Terminal / iTerm2) by hand.
 
 ---
 
