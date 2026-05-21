@@ -96,6 +96,46 @@ extension Notification.Name {
     static let imDidSwitch    = Notification.Name("IMDidSwitch")
 }
 
+// MARK: - Log
+//
+// Single-line append-only log gated by RuleStore.debugLogEnabled.
+// All log emission goes through `Log.debug(_:)` — call sites stay short
+// and unaware of file paths, timestamps, or the toggle.
+enum Log {
+    static let path: String = {
+        let dir = NSHomeDirectory() + "/Library/Logs/TermIMS"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        return dir + "/termims.log"
+    }()
+
+    private static let formatter = ISO8601DateFormatter()
+    private static var handle: FileHandle? = openHandle()
+
+    private static func openHandle() -> FileHandle? {
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        let fh = FileHandle(forWritingAtPath: path)
+        fh?.seekToEndOfFile()
+        return fh
+    }
+
+    static func debug(_ msg: @autoclosure () -> String) {
+        guard RuleStore.shared.debugLogEnabled else { return }
+        if handle == nil { handle = openHandle() }
+        guard let fh = handle else { return }
+        let line = "[\(formatter.string(from: Date()))] \(msg())\n"
+        guard let data = line.data(using: .utf8) else { return }
+        fh.write(data)
+    }
+
+    static func clear() {
+        try? handle?.close()
+        handle = nil
+        try? FileManager.default.removeItem(atPath: path)
+    }
+}
+
 // MARK: - Rule Store
 
 class RuleStore {
@@ -132,6 +172,11 @@ class RuleStore {
     var hideMenuBarIcon: Bool {
         get { ud.bool(forKey: "HideMenuBarIcon") }
         set { ud.set(newValue, forKey: "HideMenuBarIcon"); notify() }
+    }
+
+    var debugLogEnabled: Bool {
+        get { ud.bool(forKey: "DebugLogEnabled") }
+        set { ud.set(newValue, forKey: "DebugLogEnabled") }
     }
 
     var terminalRules: [TerminalRule] {
@@ -285,21 +330,28 @@ class FocusMonitor {
 
     private func resolveInputSource(for bid: String) -> String? {
         let store = RuleStore.shared
+        let result: (String?, String)
         if isTerminalWithRules(bid) {
             if let matched = matchTerminalRule(bid: bid, store: store) {
-                return matched
+                result = (matched, "terminal-rule")
+            } else if let termDefault = store.terminalDefaultSourceID {
+                result = (termDefault, "terminal-default")
+            } else if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
+                result = (rule.inputSourceID, "app-rule")
+            } else {
+                result = (store.defaultSourceID, "global-default")
             }
-            if let termDefault = store.terminalDefaultSourceID {
-                return termDefault
-            }
+        } else if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
+            result = (rule.inputSourceID, "app-rule")
+        } else {
+            result = (store.defaultSourceID, "global-default")
         }
-        if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
-            return rule.inputSourceID
-        }
-        return store.defaultSourceID
+        Log.debug("MATCH RESULT bid=\(bid) source=\(result.0 ?? "nil") via=\(result.1)")
+        return result.0
     }
 
     private func matchTerminalRule(bid: String, store: RuleStore) -> String? {
+        Log.debug("MATCH START bid=\(bid)")
         let rules = store.terminalRules.filter(\.enabled)
         guard !rules.isEmpty else { return nil }
 
@@ -310,6 +362,7 @@ class FocusMonitor {
             for rule in titleRules {
                 if !rule.pattern.isEmpty &&
                    title.localizedCaseInsensitiveContains(rule.pattern) {
+                    Log.debug("TITLE RULE HIT: pattern=\(rule.pattern) title=\(title)")
                     return rule.inputSourceID
                 }
             }
@@ -317,12 +370,15 @@ class FocusMonitor {
 
         if !processRules.isEmpty {
             let procs = getTerminalForegroundProcesses(bid: bid)
+            Log.debug("PROCESS MATCH: procs=\(procs) rules=\(processRules.map { "\($0.pattern)" })")
             for rule in processRules {
                 if !rule.pattern.isEmpty &&
                    procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) }) {
+                    Log.debug("PROCESS RULE HIT: procs=\(procs) pattern=\(rule.pattern)")
                     return rule.inputSourceID
                 }
             }
+            Log.debug("PROCESS RULE MISS")
         }
 
         return nil
@@ -617,14 +673,24 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         t2.view = buildAppRulesTab()
         let t3 = NSTabViewItem(identifier: "terminal"); t3.label = "Terminal Rules"
         t3.view = buildTerminalRulesTab()
+        let t4 = NSTabViewItem(identifier: "shell"); t4.label = "Shell Integration"
+        t4.view = buildShellIntegrationTab()
 
         tabView.addTabViewItem(t1)
         tabView.addTabViewItem(t2)
         tabView.addTabViewItem(t3)
+        tabView.addTabViewItem(t4)
 
         appTableView.dataSource = self; appTableView.delegate = self
         termTableView.dataSource = self; termTableView.delegate = self
+        appTableView.registerForDraggedTypes([Self.appRowDragType])
+        termTableView.registerForDraggedTypes([Self.termRowDragType])
+        appTableView.draggingDestinationFeedbackStyle = .gap
+        termTableView.draggingDestinationFeedbackStyle = .gap
     }
+
+    static let appRowDragType  = NSPasteboard.PasteboardType("top.cuiko.termims.app-rule-row")
+    static let termRowDragType = NSPasteboard.PasteboardType("top.cuiko.termims.term-rule-row")
 
     // MARK: General Tab
 
@@ -664,8 +730,23 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         hideCheck.translatesAutoresizingMaskIntoConstraints = false
         hideCheck.state = store.hideMenuBarIcon ? .on : .off
 
+        let sep3 = separator()
+        let debugLabel = label("Debug")
+        debugLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        let debugCheck = NSButton(checkboxWithTitle: "Enable debug logging",
+                                  target: self, action: #selector(debugLogToggled(_:)))
+        debugCheck.translatesAutoresizingMaskIntoConstraints = false
+        debugCheck.state = store.debugLogEnabled ? .on : .off
+
+        let clearBtn = NSButton(title: "Clear Log", target: self, action: #selector(clearDebugLog(_:)))
+        clearBtn.translatesAutoresizingMaskIntoConstraints = false
+        clearBtn.bezelStyle = .rounded
+        clearBtn.controlSize = .regular
+
         for sub in [defLabel, defPopup, sep1, indLabel, indCheck, posLabel, posPopup,
-                    sep2, appLabel, hideCheck] { v.addSubview(sub) }
+                    sep2, appLabel, hideCheck,
+                    sep3, debugLabel, debugCheck, clearBtn] { v.addSubview(sub) }
         NSLayoutConstraint.activate([
             defLabel.topAnchor.constraint(equalTo: v.topAnchor, constant: 20),
             defLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
@@ -695,6 +776,17 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
             appLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
             hideCheck.topAnchor.constraint(equalTo: appLabel.bottomAnchor, constant: 10),
             hideCheck.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+
+            sep3.topAnchor.constraint(equalTo: hideCheck.bottomAnchor, constant: 20),
+            sep3.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 12),
+            sep3.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -12),
+
+            debugLabel.topAnchor.constraint(equalTo: sep3.bottomAnchor, constant: 16),
+            debugLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            debugCheck.topAnchor.constraint(equalTo: debugLabel.bottomAnchor, constant: 10),
+            debugCheck.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            clearBtn.centerYAnchor.constraint(equalTo: debugCheck.centerYAnchor),
+            clearBtn.leadingAnchor.constraint(equalTo: debugCheck.trailingAnchor, constant: 12),
         ])
         return v
     }
@@ -716,6 +808,116 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     }
     @objc private func hideIconToggled(_ sender: NSButton) {
         RuleStore.shared.hideMenuBarIcon = sender.state == .on
+    }
+    @objc private func debugLogToggled(_ sender: NSButton) {
+        RuleStore.shared.debugLogEnabled = sender.state == .on
+    }
+    @objc private func clearDebugLog(_ sender: NSButton) {
+        Log.clear()
+    }
+
+    // MARK: Shell Integration Tab
+
+    private static let shellIntegrationSnippet = """
+    # TermIMS shell integration — write tty into OSC 7 so TermIMS can
+    # unambiguously map a focused terminal tab to its tty / foreground process.
+    # Works in bash and zsh. For fish, see the project README.
+    _termims_osc7() {
+      # Reorder self to last in precmd_functions so emitters running after us
+      # (e.g. Ghostty's own shell integration) can't overwrite our OSC 7.
+      if [ -n "$ZSH_VERSION" ]; then
+        precmd_functions=(${precmd_functions:#_termims_osc7} _termims_osc7)
+      fi
+      local t
+      t=$(tty 2>/dev/null) || return
+      printf '\\e]7;file://%s%s?tty=%s\\e\\\\' "${HOST:-$HOSTNAME}" "$PWD" "${t##*/}"
+    }
+    if [ -n "$ZSH_VERSION" ]; then
+      typeset -ag precmd_functions
+      precmd_functions+=(_termims_osc7)
+    else
+      PROMPT_COMMAND="${PROMPT_COMMAND%;}${PROMPT_COMMAND:+;}_termims_osc7"
+    fi
+    """
+
+    private func buildShellIntegrationTab() -> NSView {
+        let v = NSView()
+
+        let title = label("Shell Integration (optional)")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        let desc = NSTextField(wrappingLabelWithString:
+            "When multiple tabs share the same working directory, TermIMS can't tell them apart from CWD alone. " +
+            "Add this snippet to your shell rc (~/.zshrc or ~/.bashrc) and TermIMS will read the tty straight from " +
+            "the terminal's OSC 7 update — no heuristics, no title parsing.\n\n" +
+            "Note: Ghostty currently re-emits its own OSC 7 last in every prompt cycle, stripping any query " +
+            "parameters we add — so this hook has no effect inside Ghostty. It still helps in iTerm2, Terminal.app, " +
+            "Alacritty, and other terminals that pass OSC 7 through unchanged.")
+        desc.translatesAutoresizingMaskIntoConstraints = false
+        desc.font = .systemFont(ofSize: 12)
+        desc.textColor = .secondaryLabelColor
+
+        let tv = NSTextView()
+        tv.string = Self.shellIntegrationSnippet
+        tv.isEditable = false
+        tv.isSelectable = true
+        tv.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        tv.textContainerInset = NSSize(width: 6, height: 6)
+        tv.drawsBackground = true
+        tv.backgroundColor = .textBackgroundColor
+
+        let sv = NSScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.hasVerticalScroller = true
+        sv.borderType = .lineBorder
+        sv.documentView = tv
+
+        let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyShellIntegration(_:)))
+        copyBtn.translatesAutoresizingMaskIntoConstraints = false
+        copyBtn.bezelStyle = .rounded
+        copyBtn.keyEquivalent = "\r"
+
+        let hint = NSTextField(wrappingLabelWithString:
+            "After pasting, open a new terminal tab (or run `source ~/.zshrc`) and switch into it. " +
+            "TermIMS will pick the tty automatically — even with several tabs in the same directory.")
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+
+        for sub in [title, desc, sv, copyBtn, hint] { v.addSubview(sub) }
+
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: v.topAnchor, constant: 16),
+            title.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+
+            desc.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            desc.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            desc.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+
+            sv.topAnchor.constraint(equalTo: desc.bottomAnchor, constant: 12),
+            sv.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            sv.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+            sv.heightAnchor.constraint(equalToConstant: 220),
+
+            copyBtn.topAnchor.constraint(equalTo: sv.bottomAnchor, constant: 12),
+            copyBtn.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
+
+            hint.centerYAnchor.constraint(equalTo: copyBtn.centerYAnchor),
+            hint.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            hint.trailingAnchor.constraint(equalTo: copyBtn.leadingAnchor, constant: -12),
+        ])
+        return v
+    }
+
+    @objc private func copyShellIntegration(_ sender: NSButton) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(Self.shellIntegrationSnippet, forType: .string)
+        let original = sender.title
+        sender.title = "Copied!"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            sender.title = original
+        }
     }
 
     // MARK: App Rules Tab
@@ -843,6 +1045,49 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         let colIM = NSTableColumn(identifier: .init("tim")); colIM.title = "Input Method"; colIM.width = 180; colIM.minWidth = 120
         tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM)
         sv.documentView = tv; return sv
+    }
+
+    // MARK: Table Drag Reordering
+
+    func tableView(_ tv: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        let item = NSPasteboardItem()
+        let type = (tv === termTableView) ? Self.termRowDragType : Self.appRowDragType
+        item.setString("\(row)", forType: type)
+        return item
+    }
+
+    func tableView(_ tv: NSTableView,
+                   validateDrop info: NSDraggingInfo,
+                   proposedRow row: Int,
+                   proposedDropOperation op: NSTableView.DropOperation) -> NSDragOperation {
+        guard op == .above else { return [] }
+        return .move
+    }
+
+    func tableView(_ tv: NSTableView,
+                   acceptDrop info: NSDraggingInfo,
+                   row: Int,
+                   dropOperation op: NSTableView.DropOperation) -> Bool {
+        let type = (tv === termTableView) ? Self.termRowDragType : Self.appRowDragType
+        guard let items = info.draggingPasteboard.pasteboardItems,
+              let str = items.first?.string(forType: type),
+              let src = Int(str), src != row, src != row - 1 else { return false }
+
+        if tv === termTableView {
+            var rules = RuleStore.shared.terminalRules
+            let dst = src < row ? row - 1 : row
+            let moved = rules.remove(at: src)
+            rules.insert(moved, at: dst)
+            RuleStore.shared.terminalRules = rules
+        } else {
+            var rules = RuleStore.shared.rules
+            let dst = src < row ? row - 1 : row
+            let moved = rules.remove(at: src)
+            rules.insert(moved, at: dst)
+            RuleStore.shared.rules = rules
+        }
+        tv.reloadData()
+        return true
     }
 
     // MARK: Table DataSource / Delegate
@@ -1161,6 +1406,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        Log.debug("=== TermIMS started ===")
         if AXIsProcessTrusted() {
             wasTrusted = true
             startApp()
