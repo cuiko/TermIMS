@@ -91,6 +91,15 @@ enum IndicatorPosition: String, Codable, CaseIterable {
 
 protocol TerminalAdapter {
     var bundleID: String { get }
+
+    /// Whether the matcher should also subscribe to `kAXTitleChangedNotification`
+    /// for this terminal. Useful for terminals that render multiple panes
+    /// inside a single AX window (e.g. kitty splits) and thus signal pane
+    /// focus changes only via title updates. Most terminals get this wrong
+    /// when foreground programs animate their title (cc's braille spinner),
+    /// so default is false.
+    var needsTitleChangeNotification: Bool { get }
+
     /// Resolve the focused tab's tty (e.g. via AppleScript, CLI, IPC).
     /// `appPid` is the PID of the terminal app instance whose focus event
     /// triggered this lookup — adapters use it to disambiguate when the user
@@ -101,6 +110,7 @@ protocol TerminalAdapter {
 }
 
 extension TerminalAdapter {
+    var needsTitleChangeNotification: Bool { false }
     func focusedTty(appPid: pid_t) -> dev_t? { nil }
 }
 
@@ -286,6 +296,9 @@ struct WezTermAdapter: TerminalAdapter {
 /// know which socket to talk to.
 struct KittyAdapter: TerminalAdapter {
     let bundleID = "net.kovidgoyal.kitty"
+    // kitty renders panes inside a single AX window; intra-window split
+    // focus changes only fire title-change notifications, not focus-element.
+    var needsTitleChangeNotification: Bool { true }
 
     func focusedTty(appPid: pid_t) -> dev_t? {
         guard let bin = resolveSiblingBinary(bundleID: bundleID, name: "kitten") else {
@@ -910,10 +923,14 @@ class FocusMonitor {
         // `hasSuffix(cwdBase)` is intentionally NOT used: cc's spinner titles
         // like "⠂ TermIMS" would otherwise be mistaken for shell prompts and
         // route the cc tab to a sibling zsh tty.
+        // "…/path" is Ghostty's truncated-path form for shell prompts when
+        // the cwd is too long to fit the title bar. Treat it the same as a
+        // bare absolute or home-relative path.
         let looksLikeShell = !title.isEmpty && (
             title == cwdBase
             || title.hasPrefix("/")
             || title.hasPrefix("~")
+            || title.hasPrefix("…")
             || shellNames.contains(title)
         )
 
@@ -1023,12 +1040,10 @@ class FocusMonitor {
 
         var notifs = [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification] as [CFString]
         if terminalBundleIDs.contains(bid) {
-            // kAXFocusedUIElement covers tab switches in cooperating terminals
-            // (Ghostty, Apple Terminal). Title changes catch intra-window split
-            // / pane switches in terminals that re-render internally (kitty)
-            // since they update the window title to track the focused pane.
             notifs.append(kAXFocusedUIElementChangedNotification as CFString)
-            notifs.append(kAXTitleChangedNotification as CFString)
+            if TerminalAdapters.adapter(for: bid).needsTitleChangeNotification {
+                notifs.append(kAXTitleChangedNotification as CFString)
+            }
         }
         for name in notifs { AXObserverAddNotification(observer, el, name, ptr) }
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
