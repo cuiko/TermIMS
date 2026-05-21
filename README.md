@@ -103,7 +103,13 @@ Process Name rules match the kernel-reported executable (`kp_proc.p_comm`), not 
 
 ## Uninstall
 
-Trashing `TermIMS.app` only removes the bundle. Run `./uninstall.sh` (from a clone or the DMG) to also quit the app, unload the launch agent, and delete the UserDefaults plist, log directory, and caches. macOS doesn't let scripts revoke privacy grants — remove TermIMS from **System Settings → Privacy & Security → Accessibility** (and **→ Automation** if you used Apple Terminal / iTerm2) by hand.
+Trashing `TermIMS.app` only removes the bundle. Run the bundled uninstall script to also quit the app, unload the launch agent, and delete the UserDefaults plist, log directory, and caches:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cuiko/TermIMS/main/uninstall.sh | bash
+```
+
+macOS doesn't let scripts revoke privacy grants — remove TermIMS from **System Settings → Privacy & Security → Accessibility** (and **→ Automation** if you used Apple Terminal / iTerm2) by hand.
 
 ---
 
