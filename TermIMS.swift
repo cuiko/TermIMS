@@ -749,16 +749,26 @@ class FocusMonitor {
             let candidates = getTerminalCandidateProcesses(bid: bid)
             let titleForLog = getFocusedWindowTitle(bid: bid) ?? ""
             Log.debug("PROCESS MATCH: title=\(titleForLog) candidates=\(candidates) rules=\(processRules.map { "\($0.pattern)" })")
-            for (i, procs) in candidates.enumerated() {
-                for rule in processRules {
-                    if !rule.pattern.isEmpty &&
-                       procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) }) {
-                        Log.debug("PROCESS RULE HIT: idx=\(i) procs=\(procs) pattern=\(rule.pattern)")
-                        return rule.inputSourceID
-                    }
-                }
+
+            // Per-candidate rule resolution. Multiple candidates mean we
+            // couldn't narrow the focused tab to one tty (e.g. several
+            // ghostty tabs in the same cwd, generic title). Apply a rule
+            // only when every candidate agrees — otherwise an idle tab
+            // could get mis-switched just because a *different* tab in
+            // the same cwd happens to be running `claude`.
+            let hits: [TerminalRule?] = candidates.map { procs in
+                processRules.first(where: { rule in
+                    !rule.pattern.isEmpty &&
+                    procs.contains(where: { $0.localizedCaseInsensitiveContains(rule.pattern) })
+                })
             }
-            Log.debug("PROCESS RULE MISS: no match in \(candidates.count) candidates")
+            if let firstHit = hits.first ?? nil,
+               hits.allSatisfy({ $0?.inputSourceID == firstHit.inputSourceID }) {
+                Log.debug("PROCESS RULE HIT: pattern=\(firstHit.pattern) across \(hits.count) candidate(s)")
+                return firstHit.inputSourceID
+            }
+            let hitCount = hits.compactMap { $0 }.count
+            Log.debug("PROCESS RULE MISS: \(candidates.count) candidate(s), \(hitCount) hit, ambiguous → fall through")
         }
 
         return nil
