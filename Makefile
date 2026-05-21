@@ -1,24 +1,13 @@
-APP_NAME   := TermIMS
-BUILD_DIR  := build
-BUNDLE     := $(BUILD_DIR)/$(APP_NAME).app
-BIN        := $(BUNDLE)/Contents/MacOS/$(APP_NAME)
+APP_NAME    := TermIMS
+BUILD_DIR   := build
+BUNDLE      := $(BUILD_DIR)/$(APP_NAME).app
 INSTALL_DIR := /Applications/$(APP_NAME).app
-SRC        := TermIMS.swift
-PLIST      := Info.plist
-DIST_DIR   := dist
-FRAMEWORKS := -framework Cocoa -framework Carbon
+DIST_DIR    := dist
 
-.PHONY: build install clean run dist
+.PHONY: build install run dist clean
 
-build: $(BIN)
-
-$(BIN): $(SRC) $(PLIST) AppIcon.icns
-	@mkdir -p $(BUNDLE)/Contents/MacOS $(BUNDLE)/Contents/Resources
-	@cp $(PLIST) $(BUNDLE)/Contents/
-	@cp AppIcon.icns $(BUNDLE)/Contents/Resources/
-	swiftc -O -o $@ $(SRC) $(FRAMEWORKS)
-	@codesign --force --sign - $(BUNDLE)
-	@echo "Built → $(BUNDLE)"
+build:
+	@bash Scripts/package-app.sh
 
 install: build
 	@pkill -x $(APP_NAME) 2>/dev/null && sleep 0.3 || true
@@ -40,4 +29,4 @@ dist: build
 	@echo "Packaged → $(DIST_DIR)/$(APP_NAME).dmg"
 
 clean:
-	rm -rf $(BUILD_DIR) $(DIST_DIR)
+	rm -rf $(BUILD_DIR) $(DIST_DIR) .build .swiftpm

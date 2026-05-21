@@ -1,6 +1,6 @@
 <h1 align="center">TermIMS</h1>
 
-<p align="center"><img src="icon.png" width="128"></p>
+<p align="center"><img src="Resources/AppIcon.png" width="128"></p>
 
 <p align="center">A lightweight macOS menu bar app that automatically switches input methods based on the active application — and for terminal apps, based on the running process or tab title.</p>
 
@@ -55,24 +55,19 @@ Download `TermIMS.dmg` from the [Releases](https://github.com/cuiko/TermIMS/rele
 
 ### Build from source
 
-The project is a single Swift file compiled directly with `swiftc`. No Xcode project needed.
+Swift Package Manager layout, no Xcode project. `make` wraps `swift build -c release` and bundles the binary into `TermIMS.app` via `Scripts/package-app.sh`.
 
 ```sh
 git clone https://github.com/cuiko/TermIMS.git
 cd TermIMS
 
-# Build locally
-make build
-
-# Build and install to /Applications
-make install
-
-# Build, install, and launch
-make run
-
-# Package as DMG for distribution
-make dist
+make build      # build into build/TermIMS.app
+make install    # build + copy to /Applications
+make run        # build + install + launch
+make dist       # package dist/TermIMS.dmg
 ```
+
+Requires Swift 5.9+ (Xcode 15) and macOS 13.0+.
 
 ## Usage
 
