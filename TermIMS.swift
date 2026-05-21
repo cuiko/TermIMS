@@ -2107,19 +2107,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let defItem = NSMenuItem(title: "Default: \(defName)", action: nil, keyEquivalent: "")
         defItem.isEnabled = false; menu.addItem(defItem)
 
-        if !store.rules.isEmpty { menu.addItem(.separator()) }
-        for rule in store.rules {
-            let s = rule.enabled ? "\u{2713}" : "\u{2717}"
-            let item = NSMenuItem(title: "\(s)  \(rule.appName) \u{2192} \(rule.inputSourceName)", action: nil, keyEquivalent: "")
-            item.isEnabled = false; menu.addItem(item)
+        let activeAppRules = store.rules.filter(\.enabled)
+        if !activeAppRules.isEmpty {
+            menu.addItem(.separator())
+            let hdr = NSMenuItem(title: "App Rules", action: nil, keyEquivalent: "")
+            hdr.isEnabled = false; menu.addItem(hdr)
+            for rule in activeAppRules {
+                let item = NSMenuItem(title: "  \(rule.appName) \u{2192} \(rule.inputSourceName)", action: nil, keyEquivalent: "")
+                item.isEnabled = false; menu.addItem(item)
+            }
         }
 
-        let termRules = store.terminalRules.filter(\.enabled)
-        if !termRules.isEmpty {
+        let activeTermRules = store.terminalRules.filter(\.enabled)
+        if !activeTermRules.isEmpty {
             menu.addItem(.separator())
             let hdr = NSMenuItem(title: "Terminal Rules", action: nil, keyEquivalent: "")
             hdr.isEnabled = false; menu.addItem(hdr)
-            for rule in termRules {
+            for rule in activeTermRules {
                 let typeStr = rule.matchType == .title ? "title" : "proc"
                 let item = NSMenuItem(title: "  \(typeStr):\(rule.pattern) \u{2192} \(rule.inputSourceName)", action: nil, keyEquivalent: "")
                 item.isEnabled = false; menu.addItem(item)
