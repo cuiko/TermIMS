@@ -1234,13 +1234,10 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         t2.view = buildAppRulesTab()
         let t3 = NSTabViewItem(identifier: "terminal"); t3.label = "Terminal Rules"
         t3.view = buildTerminalRulesTab()
-        let t4 = NSTabViewItem(identifier: "shell"); t4.label = "Shell Integration"
-        t4.view = buildShellIntegrationTab()
 
         tabView.addTabViewItem(t1)
         tabView.addTabViewItem(t2)
         tabView.addTabViewItem(t3)
-        tabView.addTabViewItem(t4)
 
         appTableView.dataSource = self; appTableView.delegate = self
         termTableView.dataSource = self; termTableView.delegate = self
@@ -1375,110 +1372,6 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     }
     @objc private func clearDebugLog(_ sender: NSButton) {
         Log.clear()
-    }
-
-    // MARK: Shell Integration Tab
-
-    private static let shellIntegrationSnippet = """
-    # TermIMS shell integration — write tty into OSC 7 so TermIMS can
-    # unambiguously map a focused terminal tab to its tty / foreground process.
-    # Works in bash and zsh. For fish, see the project README.
-    _termims_osc7() {
-      # Reorder self to last in precmd_functions so emitters running after us
-      # (e.g. Ghostty's own shell integration) can't overwrite our OSC 7.
-      if [ -n "$ZSH_VERSION" ]; then
-        precmd_functions=(${precmd_functions:#_termims_osc7} _termims_osc7)
-      fi
-      local t
-      t=$(tty 2>/dev/null) || return
-      printf '\\e]7;file://%s%s?tty=%s\\e\\\\' "${HOST:-$HOSTNAME}" "$PWD" "${t##*/}"
-    }
-    if [ -n "$ZSH_VERSION" ]; then
-      typeset -ag precmd_functions
-      precmd_functions+=(_termims_osc7)
-    else
-      PROMPT_COMMAND="${PROMPT_COMMAND%;}${PROMPT_COMMAND:+;}_termims_osc7"
-    fi
-    """
-
-    private func buildShellIntegrationTab() -> NSView {
-        let v = NSView()
-
-        let title = label("Shell Integration (optional)")
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-
-        let desc = NSTextField(wrappingLabelWithString:
-            "When multiple tabs share the same working directory, TermIMS can't tell them apart from CWD alone. " +
-            "Add this snippet to your shell rc (~/.zshrc or ~/.bashrc) and TermIMS will read the tty straight from " +
-            "the terminal's OSC 7 update — no heuristics, no title parsing.\n\n" +
-            "Note: Ghostty currently re-emits its own OSC 7 last in every prompt cycle, stripping any query " +
-            "parameters we add — so this hook has no effect inside Ghostty. It still helps in iTerm2, Terminal.app, " +
-            "Alacritty, and other terminals that pass OSC 7 through unchanged.")
-        desc.translatesAutoresizingMaskIntoConstraints = false
-        desc.font = .systemFont(ofSize: 12)
-        desc.textColor = .secondaryLabelColor
-
-        let tv = NSTextView()
-        tv.string = Self.shellIntegrationSnippet
-        tv.isEditable = false
-        tv.isSelectable = true
-        tv.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        tv.textContainerInset = NSSize(width: 6, height: 6)
-        tv.drawsBackground = true
-        tv.backgroundColor = .textBackgroundColor
-
-        let sv = NSScrollView()
-        sv.translatesAutoresizingMaskIntoConstraints = false
-        sv.hasVerticalScroller = true
-        sv.borderType = .lineBorder
-        sv.documentView = tv
-
-        let copyBtn = NSButton(title: "Copy", target: self, action: #selector(copyShellIntegration(_:)))
-        copyBtn.translatesAutoresizingMaskIntoConstraints = false
-        copyBtn.bezelStyle = .rounded
-        copyBtn.keyEquivalent = "\r"
-
-        let hint = NSTextField(wrappingLabelWithString:
-            "After pasting, open a new terminal tab (or run `source ~/.zshrc`) and switch into it. " +
-            "TermIMS will pick the tty automatically — even with several tabs in the same directory.")
-        hint.translatesAutoresizingMaskIntoConstraints = false
-        hint.font = .systemFont(ofSize: 11)
-        hint.textColor = .secondaryLabelColor
-
-        for sub in [title, desc, sv, copyBtn, hint] { v.addSubview(sub) }
-
-        NSLayoutConstraint.activate([
-            title.topAnchor.constraint(equalTo: v.topAnchor, constant: 16),
-            title.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
-
-            desc.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
-            desc.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
-            desc.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
-
-            sv.topAnchor.constraint(equalTo: desc.bottomAnchor, constant: 12),
-            sv.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
-            sv.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
-            sv.heightAnchor.constraint(equalToConstant: 220),
-
-            copyBtn.topAnchor.constraint(equalTo: sv.bottomAnchor, constant: 12),
-            copyBtn.trailingAnchor.constraint(equalTo: v.trailingAnchor, constant: -16),
-
-            hint.centerYAnchor.constraint(equalTo: copyBtn.centerYAnchor),
-            hint.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
-            hint.trailingAnchor.constraint(equalTo: copyBtn.leadingAnchor, constant: -12),
-        ])
-        return v
-    }
-
-    @objc private func copyShellIntegration(_ sender: NSButton) {
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(Self.shellIntegrationSnippet, forType: .string)
-        let original = sender.title
-        sender.title = "Copied!"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-            sender.title = original
-        }
     }
 
     // MARK: App Rules Tab

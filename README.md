@@ -13,7 +13,6 @@
 - **Drag-and-drop rule ordering** — Reorder App Rules and Terminal Rules in Settings. Order matters: title rules run before process rules, and within each type the first match wins.
 - **Global default** — Set a fallback input method for apps without specific rules.
 - **Terminal default** — Set a separate default for terminal apps when no sub-rule matches.
-- **Shell Integration tab** — Copy a small OSC 7 hook into your shell rc to let TermIMS read the tty straight from the terminal where the AX path is unreliable.
 - **Debug logging** — Toggle a single-line append-only log at `~/Library/Logs/TermIMS/termims.log` from Settings → General → Debug, with a one-click Clear button.
 - **Switch indicator** — A brief overlay shows the current input method on switch. Configurable position (center, corners) and can be disabled.
 - **Launch at Login** — Optional LaunchAgent-based auto-start.
@@ -81,7 +80,6 @@ make dist
 4. **General** tab — Set the global default input method, indicator preferences, and optional debug logging.
 5. **App Rules** tab — Click **+** to add an app and assign its input method. Drag rows to reorder.
 6. **Terminal Rules** tab — Set the terminal default, then add rules to match by process name or tab title. Drag to reorder; title rules are checked before process rules.
-7. **Shell Integration** tab — Optional. Copy the snippet into your shell rc if you want OSC 7 tty injection for terminals on the generic-heuristic path.
 
 ### Terminal Rules Example
 
