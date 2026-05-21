@@ -91,6 +91,16 @@ make dist
 
 When you switch to a Ghostty tab running `claude`, TermIMS detects the foreground process and switches to the configured input method. Switch to a plain shell tab and it reverts to the terminal default.
 
+## Uninstall
+
+Dragging `TermIMS.app` to the Trash only removes the bundle; the rules database, the launch agent (if you enabled Launch at Login), and the debug log stay behind. Run the bundled `uninstall.sh` from a fresh clone or from the DMG to clean everything up in one go:
+
+```sh
+./uninstall.sh
+```
+
+The script quits the app, removes `/Applications/TermIMS.app`, unloads the launch agent, deletes `~/Library/Logs/TermIMS`, the `top.cuiko.termims` UserDefaults plist, and any cached state. macOS does not let external scripts revoke privacy grants, so the last step — removing TermIMS from **System Settings → Privacy & Security → Accessibility** (and from **→ Automation** if you used Apple Terminal / iTerm2) — has to be done by hand.
+
 ---
 
 Inspired by [KeyboardHolder](https://github.com/leaves615/KeyboardHolder).
