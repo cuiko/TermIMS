@@ -1123,6 +1123,30 @@ class FocusMonitor {
 
 // MARK: - Settings Window
 
+/// NSTableView that only allows row drag when the mouse-down originated in
+/// a designated drag-handle column. Without this filter NSTableView happily
+/// starts a drag from anywhere on the row, so a user adjusting a popup risks
+/// accidentally reordering the table.
+final class RuleTableView: NSTableView {
+    /// Column identifier that acts as the row-drag grabber. Mouse-downs
+    /// outside this column are still delivered normally (clicks, popup
+    /// activation, text editing) but won't initiate drag.
+    var dragHandleColumnID: String?
+    fileprivate(set) var dragInitiatedFromHandle = false
+
+    override func mouseDown(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        let col = column(at: pt)
+        if col >= 0, col < tableColumns.count,
+           tableColumns[col].identifier.rawValue == dragHandleColumnID {
+            dragInitiatedFromHandle = true
+        } else {
+            dragInitiatedFromHandle = false
+        }
+        super.mouseDown(with: event)
+    }
+}
+
 /// Small "grip" icon shown at the start of each rule row. Purely visual: the
 /// row's drag is initiated by NSTableView when the user mouse-drags anywhere
 /// inside a row (see `tableView(_:pasteboardWriterForRow:)`). The handle's
@@ -1574,7 +1598,9 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     private func scrolledTermTable(_ tv: inout NSTableView!) -> NSScrollView {
         let sv = NSScrollView(); sv.translatesAutoresizingMaskIntoConstraints = false
         sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
-        tv = NSTableView()
+        let rtv = RuleTableView()
+        rtv.dragHandleColumnID = "tdrag"
+        tv = rtv
         tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 24
         let colDrag = NSTableColumn(identifier: .init("tdrag")); colDrag.title = ""; colDrag.width = 24; colDrag.minWidth = 24; colDrag.maxWidth = 24
         let colOn = NSTableColumn(identifier: .init("ton")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
@@ -1588,6 +1614,10 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     // MARK: Table Drag Reordering
 
     func tableView(_ tv: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        // Only allow drag when the mouse-down was on the drag handle column —
+        // see RuleTableView.mouseDown. Prevents accidental row reorder when a
+        // user drags a popup or text field to select / scroll.
+        if let rtv = tv as? RuleTableView, !rtv.dragInitiatedFromHandle { return nil }
         let item = NSPasteboardItem()
         let type = (tv === termTableView) ? Self.termRowDragType : Self.appRowDragType
         item.setString("\(row)", forType: type)
@@ -1797,7 +1827,9 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     private func scrolledTable(_ tv: inout NSTableView!) -> NSScrollView {
         let sv = NSScrollView(); sv.translatesAutoresizingMaskIntoConstraints = false
         sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
-        tv = NSTableView()
+        let rtv = RuleTableView()
+        rtv.dragHandleColumnID = "adrag"
+        tv = rtv
         tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 24
         let colDrag = NSTableColumn(identifier: .init("adrag")); colDrag.title = ""; colDrag.width = 24; colDrag.minWidth = 24; colDrag.maxWidth = 24
         let colOn = NSTableColumn(identifier: .init("on")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
