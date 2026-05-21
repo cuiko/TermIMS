@@ -84,10 +84,19 @@ enum IndicatorPosition: String, Codable, CaseIterable {
 // MARK: - Terminal Adapters
 //
 // Strategy pattern: each terminal app encapsulates its own native ways to
-// disambiguate the focused tab. `focusedTty(...)` is the only protocol method;
-// returning a non-nil tty lets the matcher skip the cwd-based candidate
-// heuristic entirely. Adapters that don't have a native channel return nil
-// and the system falls back to BFS + cwd matching.
+// disambiguate the focused tab. Three protocol hooks (all defaulted, all
+// optional to override):
+//
+//   - `focusedTty(appPid:)` — primary disambiguation channel. Returning a
+//     non-nil tty lets the matcher skip the cwd-based candidate heuristic.
+//   - `focusedTitle(appElement:)` — title source for the rule matcher's
+//     heuristics. Override when a terminal's window title doesn't track
+//     focus reliably.
+//   - `needsTitleChangeNotification` — whether to subscribe to
+//     kAXTitleChangedNotification for intra-window pane focus events.
+//
+// Adapters that don't override anything fall through to the generic
+// BFS + cwd-matching path.
 
 protocol TerminalAdapter {
     var bundleID: String { get }
@@ -183,7 +192,7 @@ struct AppleTerminalAdapter: TerminalAdapter {
         guard !path.isEmpty else { return nil }
         let name = (path as NSString).lastPathComponent
         let dev = FocusMonitor.ttyDev(forName: name)
-        Log.debug("APPLESCRIPT Apple-Terminal tty=\(path) dev=\(dev.map(String.init(describing:)) ?? "nil")")
+        Log.debug("APPLE-TERMINAL tty=\(path) dev=\(dev.map(String.init(describing:)) ?? "nil")")
         return dev
     }
 }
@@ -226,7 +235,7 @@ struct ITerm2Adapter: TerminalAdapter {
         guard !path.isEmpty else { return nil }
         let name = (path as NSString).lastPathComponent
         let dev = FocusMonitor.ttyDev(forName: name)
-        Log.debug("APPLESCRIPT iTerm2 tty=\(path) dev=\(dev.map(String.init(describing:)) ?? "nil")")
+        Log.debug("ITERM2 tty=\(path) dev=\(dev.map(String.init(describing:)) ?? "nil")")
         return dev
     }
 }
@@ -369,7 +378,7 @@ struct KittyAdapter: TerminalAdapter {
     /// its own socket file).
     private static func resolveSocket(kittyPid: pid_t) -> String? {
         let confPath = NSHomeDirectory() + "/.config/kitty/kitty.conf"
-        guard let content = try? String(contentsOfFile: confPath) else { return nil }
+        guard let content = try? String(contentsOfFile: confPath, encoding: .utf8) else { return nil }
         var declared: String?
         for line in content.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)

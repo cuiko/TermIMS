@@ -7,11 +7,14 @@
 ## Features
 
 - **Per-app input method rules** — Assign a specific input method to any application. When you switch to that app, the input method changes automatically.
-- **Terminal sub-rules** — For terminal emulators (Ghostty, Terminal.app, iTerm2, kitty, wezterm, Warp, Alacritty), define additional rules that match by:
+- **Terminal sub-rules** — For terminal emulators (Ghostty, Terminal.app, iTerm2, kitty, WezTerm, Warp), define additional rules that match by:
   - **Process name** — e.g., switch input method when `claude` or `nvim` is running in the active tab or split pane
   - **Tab title** — e.g., match a keyword in the terminal window title
+- **Drag-and-drop rule ordering** — Reorder App Rules and Terminal Rules in Settings. Order matters: title rules run before process rules, and within each type the first match wins.
 - **Global default** — Set a fallback input method for apps without specific rules.
 - **Terminal default** — Set a separate default for terminal apps when no sub-rule matches.
+- **Shell Integration tab** — Copy a small OSC 7 hook into your shell rc to let TermIMS read the tty straight from the terminal where the AX path is unreliable.
+- **Debug logging** — Toggle a single-line append-only log at `~/Library/Logs/TermIMS/termims.log` from Settings → General → Debug, with a one-click Clear button.
 - **Switch indicator** — A brief overlay shows the current input method on switch. Configurable position (center, corners) and can be disabled.
 - **Launch at Login** — Optional LaunchAgent-based auto-start.
 - **Hide menu bar icon** — Run silently without a status bar icon. Reopen the app to access Settings.
@@ -19,7 +22,7 @@
 
 ## How It Works
 
-TermIMS uses the macOS Accessibility API to monitor application focus changes and terminal tab switches. To map a focused tab to its foreground process, it goes through a small adapter layer that picks the most precise channel each terminal offers, then falls back to a generic working-directory + process-tree heuristic when no native channel exists.
+TermIMS uses the macOS Accessibility API to monitor application focus changes and terminal tab switches. To map a focused tab to its foreground process, it goes through a small `TerminalAdapter` strategy layer that picks the most precise channel each terminal offers — AppleScript for Apple Terminal and iTerm2, the bundled CLI for kitty and WezTerm, AX cwd for Ghostty — and falls back to a generic process-tree + working-directory heuristic when no native channel exists.
 
 ## Terminal Support
 
@@ -75,9 +78,10 @@ make dist
 1. Launch TermIMS (or run `make run`).
 2. Grant Accessibility permission when prompted.
 3. Click the keyboard icon in the menu bar → **Settings**.
-4. **General** tab — Set the global default input method, indicator preferences.
-5. **App Rules** tab — Click **+** to add an app and assign its input method.
-6. **Terminal Rules** tab — Set the terminal default, then add rules to match by process name or tab title.
+4. **General** tab — Set the global default input method, indicator preferences, and optional debug logging.
+5. **App Rules** tab — Click **+** to add an app and assign its input method. Drag rows to reorder.
+6. **Terminal Rules** tab — Set the terminal default, then add rules to match by process name or tab title. Drag to reorder; title rules are checked before process rules.
+7. **Shell Integration** tab — Optional. Copy the snippet into your shell rc if you want OSC 7 tty injection for terminals on the generic-heuristic path.
 
 ### Terminal Rules Example
 
