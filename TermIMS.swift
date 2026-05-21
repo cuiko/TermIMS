@@ -907,9 +907,11 @@ class FocusMonitor {
         // Empty title is usually a transient state during command lifecycle
         // (Ghostty briefly clears title while a process starts/exits) — don't
         // treat it as a shell-prompt signal, or we'll flap to ABC mid-command.
+        // `hasSuffix(cwdBase)` is intentionally NOT used: cc's spinner titles
+        // like "⠂ TermIMS" would otherwise be mistaken for shell prompts and
+        // route the cc tab to a sibling zsh tty.
         let looksLikeShell = !title.isEmpty && (
             title == cwdBase
-            || title.hasSuffix(cwdBase)
             || title.hasPrefix("/")
             || title.hasPrefix("~")
             || shellNames.contains(title)
