@@ -70,6 +70,34 @@ struct TerminalRule: Codable {
     var pattern: String = ""
     var inputSourceID: String
     var inputSourceName: String
+    /// Free-form annotation shown in the rule table. Purely cosmetic — not
+    /// used by the matcher. `decodeIfPresent` lets older stored rules (saved
+    /// before this field existed) round-trip cleanly with an empty note.
+    var note: String = ""
+
+    init(enabled: Bool = true,
+         matchType: TerminalMatchType = .title,
+         pattern: String = "",
+         inputSourceID: String,
+         inputSourceName: String,
+         note: String = "") {
+        self.enabled = enabled
+        self.matchType = matchType
+        self.pattern = pattern
+        self.inputSourceID = inputSourceID
+        self.inputSourceName = inputSourceName
+        self.note = note
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        matchType = try c.decodeIfPresent(TerminalMatchType.self, forKey: .matchType) ?? .title
+        pattern = try c.decodeIfPresent(String.self, forKey: .pattern) ?? ""
+        inputSourceID = try c.decode(String.self, forKey: .inputSourceID)
+        inputSourceName = try c.decode(String.self, forKey: .inputSourceName)
+        note = try c.decodeIfPresent(String.self, forKey: .note) ?? ""
+    }
 }
 
 enum IndicatorPosition: String, Codable, CaseIterable {
@@ -1237,12 +1265,12 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     private let inputSources = listInputSources()
 
     convenience init() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 480),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
                          styleMask: [.titled, .closable, .resizable, .miniaturizable],
                          backing: .buffered, defer: false)
         w.title = "TermIMS Settings"
         w.center()
-        w.minSize = NSSize(width: 520, height: 380)
+        w.minSize = NSSize(width: 620, height: 380)
         w.isReleasedWhenClosed = false
         self.init(window: w)
         buildUI()
@@ -1532,9 +1560,10 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         let colDrag = NSTableColumn(identifier: .init("tdrag")); colDrag.title = ""; colDrag.width = 24; colDrag.minWidth = 24; colDrag.maxWidth = 24
         let colOn = NSTableColumn(identifier: .init("ton")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
         let colType = NSTableColumn(identifier: .init("ttype")); colType.title = "Match"; colType.width = 100; colType.minWidth = 80
-        let colPat = NSTableColumn(identifier: .init("tpat")); colPat.title = "Pattern"; colPat.width = 160; colPat.minWidth = 80
-        let colIM = NSTableColumn(identifier: .init("tim")); colIM.title = "Input Method"; colIM.width = 180; colIM.minWidth = 120
-        tv.addTableColumn(colDrag); tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM)
+        let colPat = NSTableColumn(identifier: .init("tpat")); colPat.title = "Pattern"; colPat.width = 140; colPat.minWidth = 80
+        let colIM = NSTableColumn(identifier: .init("tim")); colIM.title = "Input Method"; colIM.width = 160; colIM.minWidth = 120
+        let colNote = NSTableColumn(identifier: .init("tnote")); colNote.title = "Note"; colNote.width = 140; colNote.minWidth = 80
+        tv.addTableColumn(colDrag); tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM); tv.addTableColumn(colNote)
         sv.documentView = tv; return sv
     }
 
@@ -1687,6 +1716,11 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
             configureIMPopup(popup, selected: rule.inputSourceID, row: row)
             popup.target = self; popup.action = #selector(termIMChanged(_:))
             return centeredCellView(termTableView, id: "tim\(row)", control: popup)
+        case "tnote":
+            let tf = recycledNoteField(termTableView)
+            tf.stringValue = rule.note; tf.tag = row
+            tf.target = self; tf.action = #selector(termNoteChanged(_:))
+            return centeredCellView(termTableView, id: "tnote\(row)", control: tf)
         default: return nil
         }
     }
@@ -1720,6 +1754,10 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         var r = RuleStore.shared.terminalRules
         guard s.tag < r.count, let item = s.selectedItem, let sid = item.representedObject as? String else { return }
         r[s.tag].inputSourceID = sid; r[s.tag].inputSourceName = item.title; RuleStore.shared.terminalRules = r
+    }
+    @objc private func termNoteChanged(_ s: NSTextField) {
+        var r = RuleStore.shared.terminalRules; guard s.tag < r.count else { return }
+        r[s.tag].note = s.stringValue; RuleStore.shared.terminalRules = r
     }
 
     // MARK: View Factories
@@ -1811,7 +1849,17 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         if let v = tv.makeView(withIdentifier: uid, owner: nil) as? NSTextField { return v }
         let tf = NSTextField()
         tf.identifier = uid; tf.controlSize = .small; tf.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        tf.placeholderString = "e.g. claude, nvim"
+        tf.placeholderString = "e.g. opencode, nvim"
+        tf.lineBreakMode = .byTruncatingTail; tf.cell?.sendsActionOnEndEditing = true
+        return tf
+    }
+
+    private func recycledNoteField(_ tv: NSTableView) -> NSTextField {
+        let uid = NSUserInterfaceItemIdentifier("tnote")
+        if let v = tv.makeView(withIdentifier: uid, owner: nil) as? NSTextField { return v }
+        let tf = NSTextField()
+        tf.identifier = uid; tf.controlSize = .small; tf.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        tf.placeholderString = ""
         tf.lineBreakMode = .byTruncatingTail; tf.cell?.sendsActionOnEndEditing = true
         return tf
     }

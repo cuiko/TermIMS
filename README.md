@@ -83,11 +83,11 @@ make dist
 
 ### Terminal Rules Example
 
-| Match        | Pattern         | Input Method |
-|--------------|-----------------|--------------|
-| Tab Title    | `/^[⠁-⣿✳] /`    | Pinyin       |
-| Tab Title    | `ssh`           | ABC          |
-| Process Name | `nvim`          | ABC          |
+| Match        | Pattern         | Input Method | Note                              |
+|--------------|-----------------|--------------|-----------------------------------|
+| Tab Title    | `/^[⠁-⣿✳] /`    | Pinyin       | Claude Code spinner / idle prefix |
+| Tab Title    | `ssh`           | ABC          | Remote sessions                   |
+| Process Name | `nvim`          | ABC          |                                   |
 
 Patterns are case-insensitive substrings by default. Wrap with slashes (`/pattern/`, append `i` for case-insensitive) to use a regex.
 
