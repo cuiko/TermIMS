@@ -1978,6 +1978,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         Log.debug("=== TermIMS started ===")
+        installEditMenu()
         if AXIsProcessTrusted() {
             wasTrusted = true
             startApp()
@@ -1985,6 +1986,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             showPermissionWindow()
         }
         startPermissionPolling()
+    }
+
+    /// LSUIElement apps don't get a main menu by default, which means
+    /// Cmd+C/V/X/A in any text field are dispatched into the void. Wire up
+    /// a minimal Edit menu so the standard shortcuts reach the field editor.
+    private func installEditMenu() {
+        let main = NSMenu()
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(redo)
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut",        action: #selector(NSText.cut(_:)),         keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy",       action: #selector(NSText.copy(_:)),        keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste",      action: #selector(NSText.paste(_:)),       keyEquivalent: "v")
+        edit.addItem(withTitle: "Delete",     action: #selector(NSText.delete(_:)),      keyEquivalent: "")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)),   keyEquivalent: "a")
+
+        editItem.submenu = edit
+        NSApp.mainMenu = main
     }
 
     private func startPermissionPolling() {
