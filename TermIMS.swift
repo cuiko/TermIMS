@@ -1123,6 +1123,56 @@ class FocusMonitor {
 
 // MARK: - Settings Window
 
+/// Small "grip" icon shown at the start of each rule row. Purely visual: the
+/// row's drag is initiated by NSTableView when the user mouse-drags anywhere
+/// inside a row (see `tableView(_:pasteboardWriterForRow:)`). The handle's
+/// jobs are (a) signal draggability with an open-hand cursor on hover, and
+/// (b) give users an obvious target to grab when they don't want to risk
+/// clicking a checkbox / popup by accident.
+final class DragHandleView: NSView {
+    private var trackingArea: NSTrackingArea?
+    override var intrinsicContentSize: NSSize { NSSize(width: 16, height: 16) }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        let img = NSImageView()
+        img.image = NSImage(systemSymbolName: "line.3.horizontal",
+                            accessibilityDescription: "Drag to reorder")
+        img.contentTintColor = .tertiaryLabelColor
+        img.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(img)
+        NSLayoutConstraint.activate([
+            img.centerXAnchor.constraint(equalTo: centerXAnchor),
+            img.centerYAnchor.constraint(equalTo: centerYAnchor),
+            img.widthAnchor.constraint(equalToConstant: 14),
+            img.heightAnchor.constraint(equalToConstant: 14),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    // NSTableView aggressively manages cursor rects, so addCursorRect doesn't
+    // stick. A tracking area + explicit push/pop in mouseEntered/Exited makes
+    // the hand cursor reliably appear over the handle.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(rect: bounds,
+                                  options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                                  owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        NSCursor.openHand.push()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.pop()
+    }
+}
+
 class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private var appTableView: NSTableView!
     private var termTableView: NSTableView!
@@ -1526,11 +1576,12 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
         tv = NSTableView()
         tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 24
+        let colDrag = NSTableColumn(identifier: .init("tdrag")); colDrag.title = ""; colDrag.width = 24; colDrag.minWidth = 24; colDrag.maxWidth = 24
         let colOn = NSTableColumn(identifier: .init("ton")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
         let colType = NSTableColumn(identifier: .init("ttype")); colType.title = "Match"; colType.width = 100; colType.minWidth = 80
         let colPat = NSTableColumn(identifier: .init("tpat")); colPat.title = "Pattern"; colPat.width = 160; colPat.minWidth = 80
         let colIM = NSTableColumn(identifier: .init("tim")); colIM.title = "Input Method"; colIM.width = 180; colIM.minWidth = 120
-        tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM)
+        tv.addTableColumn(colDrag); tv.addTableColumn(colOn); tv.addTableColumn(colType); tv.addTableColumn(colPat); tv.addTableColumn(colIM)
         sv.documentView = tv; return sv
     }
 
@@ -1590,11 +1641,13 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         guard row < rules.count else { return nil }
         let rule = rules[row]
         switch col?.identifier.rawValue {
+        case "adrag":
+            return centeredNarrowCellView(tv, id: "adrag\(row)", control: DragHandleView())
         case "on":
             let btn = recycledCheckbox(tv, id: "aon")
             btn.state = rule.enabled ? .on : .off; btn.tag = row
             btn.target = self; btn.action = #selector(appToggle(_:))
-            return btn
+            return centeredNarrowCellView(tv, id: "aon\(row)", control: btn)
         case "app":
             let cell = recycledAppCell(tv)
             cell.textField?.stringValue = rule.appName
@@ -1613,14 +1666,35 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         }
     }
 
+    /// Stretches the control to fill the full cell width — used for wide
+    /// controls (popup buttons, text fields). The table's default 3pt
+    /// horizontal intercell spacing keeps a small gap between columns
+    /// (macOS standard), while controls themselves occupy 100% of their
+    /// own cell.
     private func centeredCellView(_ tv: NSTableView, id: String, control: NSView) -> NSView {
         let cell = NSTableCellView()
         cell.identifier = NSUserInterfaceItemIdentifier(id + "cell")
         control.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(control)
         NSLayoutConstraint.activate([
-            control.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
-            control.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+            control.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
+            control.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            control.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    /// Centers a narrow control (checkbox, drag handle) at its intrinsic size
+    /// inside the cell. Stretching a checkbox via leading/trailing pins the
+    /// visible glyph to the left of the cell — using centerX keeps it
+    /// visually centered under the column header.
+    private func centeredNarrowCellView(_ tv: NSTableView, id: String, control: NSView) -> NSView {
+        let cell = NSTableCellView()
+        cell.identifier = NSUserInterfaceItemIdentifier(id + "cell")
+        control.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(control)
+        NSLayoutConstraint.activate([
+            control.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
             control.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
@@ -1631,11 +1705,13 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         guard row < rules.count else { return nil }
         let rule = rules[row]
         switch col?.identifier.rawValue {
+        case "tdrag":
+            return centeredNarrowCellView(termTableView, id: "tdrag\(row)", control: DragHandleView())
         case "ton":
             let btn = recycledCheckbox(termTableView, id: "ton")
             btn.state = rule.enabled ? .on : .off; btn.tag = row
             btn.target = self; btn.action = #selector(termToggle(_:))
-            return centeredCellView(termTableView, id: "ton\(row)", control: btn)
+            return centeredNarrowCellView(termTableView, id: "ton\(row)", control: btn)
         case "ttype":
             let popup = recycledMatchTypePopup(termTableView)
             popup.removeAllItems()
@@ -1723,10 +1799,11 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         sv.hasVerticalScroller = true; sv.borderType = .bezelBorder
         tv = NSTableView()
         tv.usesAlternatingRowBackgroundColors = true; tv.rowHeight = 24
+        let colDrag = NSTableColumn(identifier: .init("adrag")); colDrag.title = ""; colDrag.width = 24; colDrag.minWidth = 24; colDrag.maxWidth = 24
         let colOn = NSTableColumn(identifier: .init("on")); colOn.title = ""; colOn.width = 30; colOn.minWidth = 30; colOn.maxWidth = 30
         let colApp = NSTableColumn(identifier: .init("app")); colApp.title = "Application"; colApp.width = 200; colApp.minWidth = 120
         let colIM = NSTableColumn(identifier: .init("im")); colIM.title = "Input Method"; colIM.width = 200; colIM.minWidth = 120
-        tv.addTableColumn(colOn); tv.addTableColumn(colApp); tv.addTableColumn(colIM)
+        tv.addTableColumn(colDrag); tv.addTableColumn(colOn); tv.addTableColumn(colApp); tv.addTableColumn(colIM)
         sv.documentView = tv; return sv
     }
 
