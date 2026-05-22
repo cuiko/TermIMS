@@ -1,0 +1,22 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: swift --version
+      - name: Build .app bundle
+        run: make build
+      - name: Verify bundle
+        run: |
+          test -x build/TermIMS.app/Contents/MacOS/TermIMS
+          test -f build/TermIMS.app/Contents/Info.plist
+          plutil -lint build/TermIMS.app/Contents/Info.plist
+          codesign --verify --verbose=2 build/TermIMS.app
