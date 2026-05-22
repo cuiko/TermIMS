@@ -12,6 +12,9 @@ concurrency:
 jobs:
   build:
     runs-on: macos-14
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Show toolchain
