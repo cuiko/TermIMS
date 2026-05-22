@@ -1,19 +1,7 @@
 name: build
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
-      - 'uninstall.sh'
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'LICENSE'
-      - '.gitignore'
-      - 'uninstall.sh'
 
 # Cancel in-progress runs when a new commit supersedes them — no point
 # building stale code while a newer push is already queued.
