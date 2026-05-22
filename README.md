@@ -112,4 +112,4 @@ Inspired by [KeyboardHolder](https://github.com/leaves615/KeyboardHolder).
 
 ## License
 
-MIT
+[MIT](LICENSE)
