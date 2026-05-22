@@ -2,7 +2,7 @@
 
 <p align="center"><img src="Resources/AppIcon.png" width="128"></p>
 
-<p align="center">A lightweight macOS menu bar app that automatically switches input methods based on the active application — and for terminal apps, based on the running process or tab title.</p>
+<p align="center">A lightweight macOS menu bar app that automatically switches input methods based on the focused app — and for terminals, by the running process or tab title.</p>
 
 ## Features
 
@@ -67,7 +67,7 @@ make run        # build + install + launch
 make dist       # package dist/TermIMS.dmg
 ```
 
-Requires Swift 5.9+ (Xcode 15) and macOS 13.0+.
+Requires Swift 5.9+ (Xcode 15).
 
 ## Usage
 
@@ -92,7 +92,7 @@ Patterns are case-insensitive substrings by default. Wrap with slashes (`/patter
 
 `Process Name = claude` mis-fires when several Ghostty/Warp tabs share a working directory — TermIMS can't pin focus to one tty from cwd alone, so a sibling tab running `claude` triggers the rule on the focused (non-Claude) tab. Claude Code rewrites the terminal title to `⠂ <summary>` while thinking (Braille spinner, U+2801–U+28FF) and `✳ <summary>` when idle; `/^[⠁-⣿✳] /` catches both forms and only matches a focused Claude tab. The same trick works for any tool with a distinctive title prefix.
 
-### Process names vs. user-typed commands
+#### Process names vs. user-typed commands
 
 Process Name rules match the kernel-reported executable (`kp_proc.p_comm`), not the typed command. Many wrappers (`mole`, `cargo`, `bundle`, `mise`, `asdf`, …) `exec` into a different binary, so `mole analyze` shows up as `analyze-go`. Match the underlying binary, or use a Tab Title rule (shell `preexec` hooks usually put the typed command in the title).
 
