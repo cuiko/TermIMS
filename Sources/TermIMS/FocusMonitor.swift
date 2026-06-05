@@ -393,6 +393,14 @@ class FocusMonitor {
 
     private func handleWindowFocus(_ bid: String) {
         guard enabled else { return }
+        // AX window / focused-element / title notifications also fire while an
+        // app is in the *background* — most painfully for a terminal whose
+        // foreground program animates its title (e.g. Claude Code's braille
+        // spinner). Without this guard those background ticks would let the
+        // terminal's rule reach across and switch the input method of whatever
+        // app is actually in front (Obsidian, a browser, …). Only act when the
+        // event's app is the one the user is currently looking at.
+        guard isFrontmost(bid) else { return }
         if isTerminalWithRules(bid) {
             debouncedResolve(bid)
         } else {
@@ -406,10 +414,18 @@ class FocusMonitor {
         termDebounce?.invalidate()
         termDebounce = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
             guard let self, self.enabled else { return }
+            // Re-check at fire time: during the debounce the user may have
+            // switched away from the terminal (e.g. to Obsidian), and we must
+            // not yank the now-frontmost app's input method.
+            guard self.isFrontmost(bid) else { return }
             if let id = self.resolveInputSource(for: bid) {
                 selectInputSource(id)
             }
         }
+    }
+
+    private func isFrontmost(_ bid: String) -> Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bid
     }
 
     @objc private func launched(_ n: Notification) {
