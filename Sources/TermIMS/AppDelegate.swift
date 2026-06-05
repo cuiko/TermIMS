@@ -12,10 +12,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionPollTimer: Timer?
     private var wasTrusted = false
 
-    private var launchAgentPath: String {
-        NSHomeDirectory() + "/Library/LaunchAgents/top.cuiko.termims.plist"
-    }
-
     func applicationDidFinishLaunching(_ n: Notification) {
         Log.debug("=== TermIMS started ===")
         installEditMenu()
@@ -177,7 +173,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
         loginItem.target = self
-        loginItem.state = FileManager.default.fileExists(atPath: launchAgentPath) ? .on : .off
+        loginItem.state = LaunchAtLogin.isEnabled ? .on : .off
         menu.addItem(loginItem)
 
         menu.addItem(.separator())
@@ -199,19 +195,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWC?.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
     }
     @objc private func toggleLogin() {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: launchAgentPath) {
-            try? fm.removeItem(atPath: launchAgentPath)
-        } else {
-            try? fm.createDirectory(atPath: NSHomeDirectory() + "/Library/LaunchAgents", withIntermediateDirectories: true)
-            let plist: NSDictionary = [
-                "Label": "top.cuiko.termims",
-                "ProgramArguments": [Bundle.main.executablePath ?? ""],
-                "RunAtLoad": true,
-            ]
-            plist.write(toFile: launchAgentPath, atomically: true)
-        }
-        loginItem.state = fm.fileExists(atPath: launchAgentPath) ? .on : .off
+        LaunchAtLogin.setEnabled(!LaunchAtLogin.isEnabled)
+        loginItem.state = LaunchAtLogin.isEnabled ? .on : .off
     }
     @objc private func quitApp() { monitor.stop(); NSApp.terminate(nil) }
 }

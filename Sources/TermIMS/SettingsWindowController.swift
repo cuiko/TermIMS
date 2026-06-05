@@ -161,6 +161,11 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         let appLabel = label("Application")
         appLabel.font = .systemFont(ofSize: 13, weight: .semibold)
 
+        let loginCheck = NSButton(checkboxWithTitle: "Launch at login",
+                                  target: self, action: #selector(launchAtLoginToggled(_:)))
+        loginCheck.translatesAutoresizingMaskIntoConstraints = false
+        loginCheck.state = LaunchAtLogin.isEnabled ? .on : .off
+
         let hideCheck = NSButton(checkboxWithTitle: "Hide menu bar icon (reopen app to show Settings)",
                                  target: self, action: #selector(hideIconToggled(_:)))
         hideCheck.translatesAutoresizingMaskIntoConstraints = false
@@ -181,7 +186,7 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         clearBtn.controlSize = .regular
 
         for sub in [defLabel, defPopup, sep1, indLabel, indCheck, posLabel, posPopup,
-                    sep2, appLabel, hideCheck,
+                    sep2, appLabel, loginCheck, hideCheck,
                     sep3, debugLabel, debugCheck, clearBtn] { v.addSubview(sub) }
         NSLayoutConstraint.activate([
             defLabel.topAnchor.constraint(equalTo: v.topAnchor, constant: 20),
@@ -210,7 +215,9 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
 
             appLabel.topAnchor.constraint(equalTo: sep2.bottomAnchor, constant: 16),
             appLabel.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
-            hideCheck.topAnchor.constraint(equalTo: appLabel.bottomAnchor, constant: 10),
+            loginCheck.topAnchor.constraint(equalTo: appLabel.bottomAnchor, constant: 10),
+            loginCheck.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
+            hideCheck.topAnchor.constraint(equalTo: loginCheck.bottomAnchor, constant: 8),
             hideCheck.leadingAnchor.constraint(equalTo: v.leadingAnchor, constant: 16),
 
             sep3.topAnchor.constraint(equalTo: hideCheck.bottomAnchor, constant: 20),
@@ -241,6 +248,9 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     }
     @objc private func indicatorPosChanged(_ sender: NSPopUpButton) {
         RuleStore.shared.indicatorPosition = IndicatorPosition.allCases[sender.indexOfSelectedItem]
+    }
+    @objc private func launchAtLoginToggled(_ sender: NSButton) {
+        LaunchAtLogin.setEnabled(sender.state == .on)
     }
     @objc private func hideIconToggled(_ sender: NSButton) {
         RuleStore.shared.hideMenuBarIcon = sender.state == .on
