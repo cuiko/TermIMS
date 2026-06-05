@@ -78,6 +78,7 @@ final class DragHandleView: NSView {
 class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
     private var appTableView: NSTableView!
     private var termTableView: NSTableView!
+    private var loginCheck: NSButton?
     private let inputSources = listInputSources()
 
     convenience init() {
@@ -90,6 +91,19 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
         w.isReleasedWhenClosed = false
         self.init(window: w)
         buildUI()
+        // The General tab is built once and the controller is cached, so a
+        // launch-at-login change made elsewhere (the user toggling our entry
+        // in System Settings → Login Items) would leave the checkbox stale.
+        // macOS sends us no notification for that, so re-read the live
+        // SMAppService status every time the window comes forward.
+        NotificationCenter.default.addObserver(self, selector: #selector(syncExternalState),
+                                               name: NSWindow.didBecomeKeyNotification, object: w)
+    }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func syncExternalState() {
+        loginCheck?.state = LaunchAtLogin.isEnabled ? .on : .off
     }
 
     // MARK: Tab Builder
@@ -165,6 +179,7 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
                                   target: self, action: #selector(launchAtLoginToggled(_:)))
         loginCheck.translatesAutoresizingMaskIntoConstraints = false
         loginCheck.state = LaunchAtLogin.isEnabled ? .on : .off
+        self.loginCheck = loginCheck
 
         let hideCheck = NSButton(checkboxWithTitle: "Hide menu bar icon (reopen app to show Settings)",
                                  target: self, action: #selector(hideIconToggled(_:)))
