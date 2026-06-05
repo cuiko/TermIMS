@@ -8,7 +8,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWC: SettingsWindowController?
     private var permissionWC: PermissionWindowController?
     private var enabledItem: NSMenuItem!
-    private var loginItem: NSMenuItem!
     private var permissionPollTimer: Timer?
     private var wasTrusted = false
 
@@ -171,12 +170,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settings.target = self; menu.addItem(settings)
 
         menu.addItem(.separator())
-        loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
-        loginItem.target = self
-        loginItem.state = LaunchAtLogin.isEnabled ? .on : .off
-        menu.addItem(loginItem)
-
-        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit TermIMS", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self; menu.addItem(quit)
 
@@ -193,10 +186,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !AXIsProcessTrusted() { showPermissionWindow(); return }
         if settingsWC == nil { settingsWC = SettingsWindowController() }
         settingsWC?.showWindow(nil); NSApp.activate(ignoringOtherApps: true)
-    }
-    @objc private func toggleLogin() {
-        LaunchAtLogin.setEnabled(!LaunchAtLogin.isEnabled)
-        loginItem.state = LaunchAtLogin.isEnabled ? .on : .off
     }
     @objc private func quitApp() { monitor.stop(); NSApp.terminate(nil) }
 }

@@ -1,33 +1,39 @@
 import Foundation
+import ServiceManagement
 
-/// Launch-at-login backed by a LaunchAgent plist in ~/Library/LaunchAgents.
-/// The plist's presence is the source of truth for the enabled state, so the
-/// status-menu toggle and the Settings checkbox always agree without any
-/// stored flag of their own.
+/// Launch-at-login via `SMAppService.mainApp` (macOS 13+). Registering the
+/// app bundle this way makes it appear in System Settings → General → Login
+/// Items under "Open at Login" with the real app icon and name — unlike the
+/// legacy LaunchAgent plist, which lands in "Allow in the Background" as a
+/// raw `exec` entry from an "unidentified developer".
 enum LaunchAtLogin {
-    private static let label = "top.cuiko.termims"
-
-    private static var plistPath: String {
-        NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
-    }
-
     static var isEnabled: Bool {
-        FileManager.default.fileExists(atPath: plistPath)
+        SMAppService.mainApp.status == .enabled
     }
 
     static func setEnabled(_ enabled: Bool) {
-        let fm = FileManager.default
-        if enabled {
-            try? fm.createDirectory(atPath: NSHomeDirectory() + "/Library/LaunchAgents",
-                                    withIntermediateDirectories: true)
-            let plist: NSDictionary = [
-                "Label": label,
-                "ProgramArguments": [Bundle.main.executablePath ?? ""],
-                "RunAtLoad": true,
-            ]
-            plist.write(toFile: plistPath, atomically: true)
-        } else {
-            try? fm.removeItem(atPath: plistPath)
+        // Drop any agent left by older plist-based builds so the user isn't
+        // launched twice (once by the stale agent, once by SMAppService).
+        removeLegacyAgent()
+        do {
+            if enabled {
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            } else {
+                if SMAppService.mainApp.status == .enabled {
+                    try SMAppService.mainApp.unregister()
+                }
+            }
+        } catch {
+            Log.debug("LaunchAtLogin set(\(enabled)) failed: \(error)")
+        }
+    }
+
+    private static func removeLegacyAgent() {
+        let path = NSHomeDirectory() + "/Library/LaunchAgents/top.cuiko.termims.plist"
+        if FileManager.default.fileExists(atPath: path) {
+            try? FileManager.default.removeItem(atPath: path)
         }
     }
 }

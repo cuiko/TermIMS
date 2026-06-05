@@ -251,11 +251,6 @@ class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTab
     }
     @objc private func launchAtLoginToggled(_ sender: NSButton) {
         LaunchAtLogin.setEnabled(sender.state == .on)
-        // Launch-at-login lives in a plist, not RuleStore, so toggling it
-        // doesn't otherwise notify anyone. Post the same signal the store
-        // setters use so the status menu rebuilds and its "Launch at Login"
-        // item reflects the new state.
-        NotificationCenter.default.post(name: .rulesDidChange, object: nil)
     }
     @objc private func hideIconToggled(_ sender: NSButton) {
         RuleStore.shared.hideMenuBarIcon = sender.state == .on
