@@ -7,14 +7,14 @@
 ## Features
 
 - **Per-app input method rules** — switch input methods when the focused app changes.
-- **Terminal sub-rules** — match by process name or tab title for Ghostty, Apple Terminal, iTerm2, kitty, WezTerm, Warp. Patterns are case-insensitive substrings; wrap with `/.../` for regex.
+- **Terminal sub-rules** — match by process name or tab title for Ghostty, Apple Terminal, iTerm2, kitty, WezTerm, Warp. Patterns are case-insensitive substrings; wrap with `/.../` for regex. Inside [herdr](https://github.com/ogulcancelik/herdr), TermIMS reads the focused pane via herdr's local socket so Process Name / Tab Title rules apply per pane.
 - **Defaults** — global fallback plus a separate terminal default when no sub-rule matches.
 - **Drag-and-drop ordering** — title rules run before process rules; within each type the first match wins.
 - **Switch indicator** — brief on-screen overlay showing the new input method, with configurable position.
 
 ## How It Works
 
-TermIMS uses the macOS Accessibility API to watch app focus and terminal tab changes. It picks the most precise channel each terminal exposes — AppleScript for Apple Terminal and iTerm2, the bundled CLI for kitty and WezTerm, AX cwd for Ghostty — and falls back to a process-tree + working-directory heuristic otherwise.
+TermIMS uses the macOS Accessibility API to watch app focus and terminal tab changes. It picks the most precise channel each terminal exposes — AppleScript for Apple Terminal and iTerm2, the bundled CLI for kitty and WezTerm, AX cwd for Ghostty — and falls back to a process-tree + working-directory heuristic otherwise. When the focused host tab is [herdr](https://github.com/ogulcancelik/herdr), it queries herdr's UNIX-socket API for the focused pane (process / agent / title) instead of the host pty tree.
 
 ## Terminal Support
 
@@ -40,6 +40,12 @@ tmux runs every pane on its own pty under the `tmux` server, which macOS can't s
 set -g set-titles on
 set -g set-titles-string "#{pane_current_command}"
 ```
+
+### herdr
+
+[herdr](https://github.com/ogulcancelik/herdr) multiplexes agent panes inside one host pty, so the host process tree only ever shows `herdr`. When TermIMS detects a herdr host tab (unique tty candidate listing `herdr`, or window title `herdr`), it talks to herdr's local socket (`~/.config/herdr/herdr.sock`, or a named session under `…/sessions/<name>/`) and matches rules against that pane's agent label, foreground process names, and pane title.
+
+Typical Process Name patterns inside herdr: `claude`, `cursor`, `pi` (herdr's agent ids). Outside herdr, match the real binary (`claude`, `cursor-agent` / `agent`, `pi`, …). No extra herdr config is required beyond a running herdr session TermIMS can reach.
 
 ## Requirements
 
@@ -95,6 +101,8 @@ Patterns are case-insensitive substrings by default. Wrap with slashes (`/patter
 #### Process names vs. user-typed commands
 
 Process Name rules match the kernel-reported executable (`kp_proc.p_comm`), not the typed command. Many wrappers (`mole`, `cargo`, `bundle`, `mise`, `asdf`, …) `exec` into a different binary, so `mole analyze` shows up as `analyze-go`. Match the underlying binary, or use a Tab Title rule (shell `preexec` hooks usually put the typed command in the title).
+
+For Node / Bun / Deno (and similar), TermIMS also peels the script basename out of argv when the runtime itself is the foreground process, and respects a rewritten argv0 / `process.title` (e.g. `pi`) when there is no script path. Generic entrypoints like `cli` / `index` under `dist` / `bin` climb one more path segment; version-like directories are skipped so argv0 can win.
 
 ## Uninstall
 
