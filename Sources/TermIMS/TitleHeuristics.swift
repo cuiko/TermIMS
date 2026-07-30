@@ -34,10 +34,22 @@ extension String {
     }
 
     /// Does this title contain any of `processNames` as a case-insensitive
-    /// substring? Empty names never match.
+    /// substring? Hyphens and spaces are treated as equivalent so a window
+    /// title like "Cursor Agent" can pin a tty whose process resolved to
+    /// `cursor-agent`. Only title⊇name — never name⊇title — so a short
+    /// title like `code` cannot steal a tty whose process is `codex`.
+    /// Empty names never match.
     func mentionsAny(of processNames: [String]) -> Bool {
-        let lower = self.lowercased()
-        return processNames.contains { !$0.isEmpty && lower.contains($0.lowercased()) }
+        let norm = { (s: String) in
+            s.lowercased()
+                .replacingOccurrences(of: "-", with: " ")
+                .replacingOccurrences(of: "_", with: " ")
+        }
+        let title = norm(self)
+        return processNames.contains { name in
+            guard !name.isEmpty else { return false }
+            return title.contains(norm(name))
+        }
     }
 
     /// Does this title look like it is displaying `cwd` (the focused tab's
