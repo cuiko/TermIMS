@@ -160,7 +160,7 @@ enum HerdrClient {
               (root as? [String: Any])?["error"] == nil else { return nil }
         var cwds: [String] = []
         collectStringValues(root, key: "cwd", into: &cwds)
-        return cwds.first
+        return CanonicalPath.of(cwds.first)
     }
 
     /// Live herdr *clients* — the in-terminal processes. The headless server
@@ -201,11 +201,12 @@ enum HerdrClient {
         var info = proc_vnodepathinfo()
         let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
-        return withUnsafePointer(to: info.pvi_cdir.vip_path) { ptr in
+        let raw = withUnsafePointer(to: info.pvi_cdir.vip_path) { ptr in
             ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
                 String(cString: $0)
             }
         }
+        return CanonicalPath.of(raw)
     }
 
     private static func processArgv(_ pid: Int32) -> [String]? {

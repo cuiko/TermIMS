@@ -230,12 +230,15 @@ class FocusMonitor {
         return TerminalAdapters.adapter(for: bid).focusedTitle(appElement: app)
     }
 
-    private struct TabInfo { let cwd: String; let tty: dev_t? }
+    /// `cwd` is resolved for comparing against process working directories;
+    /// `reported` keeps the terminal's own spelling, which is what its window
+    /// title would show.
+    private struct TabInfo { let cwd: String; let reported: String; let tty: dev_t? }
 
     private func getFocusedTabInfo(bid: String) -> TabInfo? {
         if let signalOverride {
             guard let cwd = signalOverride.cwd else { return nil }
-            return TabInfo(cwd: cwd, tty: nil)
+            return TabInfo(cwd: CanonicalPath.of(cwd), reported: cwd, tty: nil)
         }
         guard let win = getFocusedWindow(bid: bid) else { return nil }
         var val: AnyObject?
@@ -248,7 +251,7 @@ class FocusMonitor {
         let tty = URLComponents(string: urlStr)?.queryItems?
             .first(where: { $0.name == "tty" })?.value
             .flatMap { Self.ttyDev(forName: $0) }
-        return TabInfo(cwd: path, tty: tty)
+        return TabInfo(cwd: CanonicalPath.of(path), reported: path, tty: tty)
     }
 
     /// Look up `/dev/<name>`'s rdev so we can compare against `kinfo_proc.e_tdev`.
@@ -267,11 +270,12 @@ class FocusMonitor {
         let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         let ret = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &pathInfo, size)
         guard ret == size else { return nil }
-        return withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) { ptr in
+        let raw = withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) { ptr in
             ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
                 String(cString: $0)
             }
         }
+        return CanonicalPath.of(raw)
     }
 
     private func procName(from kp: kinfo_proc) -> String {
@@ -442,7 +446,7 @@ class FocusMonitor {
                 //    running a foreground command. Gate on `~`/`/` prefix
                 //    so titles like "bwg-us:~" (ssh tab) don't false-match.
                 if rawTitle.hasPrefix("~") || rawTitle.hasPrefix("/") {
-                    let expanded = (rawTitle as NSString).expandingTildeInPath
+                    let expanded = CanonicalPath.of((rawTitle as NSString).expandingTildeInPath)
                     var matches: [(dev_t, [String])] = []
                     for (tdev, procs) in byTty {
                         guard let pid = shellPidPerTty[tdev],
@@ -508,7 +512,7 @@ class FocusMonitor {
         }
         let narrowed = SurfaceNarrowing.narrow(surfaces,
                                                title: getFocusedWindowTitle(bid: bid) ?? "",
-                                               cwd: tabCWD)
+                                               cwd: tabInfo?.reported ?? tabCWD)
         if narrowed.count < surfaces.count {
             Log.debug("CWD NARROWED: \(surfaces.count) → \(narrowed.map(\.id))")
         }
