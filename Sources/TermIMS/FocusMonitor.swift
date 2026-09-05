@@ -20,6 +20,11 @@ class FocusMonitor {
     private var herdrPoll: Timer?
     private var herdrPollBid: String?
     private var lastHerdrFingerprint: String?
+    /// Replaces the Accessibility-derived signals for one resolution, so an
+    /// observed tab can be replayed against the live process table without
+    /// having to focus it. Set only by `diagnose --title/--cwd`.
+    struct SignalOverride { let title: String?; let cwd: String? }
+    var signalOverride: SignalOverride?
 
     func start() {
         let nc = NSWorkspace.shared.notificationCenter
@@ -220,6 +225,7 @@ class FocusMonitor {
     }
 
     private func getFocusedWindowTitle(bid: String) -> String? {
+        if let signalOverride { return signalOverride.title }
         guard let app = elements[bid] else { return nil }
         return TerminalAdapters.adapter(for: bid).focusedTitle(appElement: app)
     }
@@ -227,6 +233,10 @@ class FocusMonitor {
     private struct TabInfo { let cwd: String; let tty: dev_t? }
 
     private func getFocusedTabInfo(bid: String) -> TabInfo? {
+        if let signalOverride {
+            guard let cwd = signalOverride.cwd else { return nil }
+            return TabInfo(cwd: cwd, tty: nil)
+        }
         guard let win = getFocusedWindow(bid: bid) else { return nil }
         var val: AnyObject?
         guard AXUIElementCopyAttributeValue(win, kAXDocumentAttribute as CFString, &val) == .success,

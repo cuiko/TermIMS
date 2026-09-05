@@ -8,27 +8,44 @@ import TermIMSCore
 /// consumes is printed, so a wrong switch can be traced to the signal that
 /// caused it without reading the debug log.
 enum Diagnostics {
-    static func run() -> Int32 {
+    static func run(bundleID: String? = nil, title: String? = nil, cwd: String? = nil) -> Int32 {
         guard AXIsProcessTrusted() else {
             emit(["error": "accessibility-not-trusted",
                   "hint": "run the installed bundle: /Applications/TermIMS.app/Contents/MacOS/TermIMS diagnose"])
             return 2
         }
-        guard let front = NSWorkspace.shared.frontmostApplication,
-              let bid = front.bundleIdentifier else {
+        // A replay names the app it is replaying: otherwise the result depends
+        // on whichever window happens to be in front while the check runs.
+        let frontID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        guard let bid = bundleID ?? frontID else {
             emit(["error": "no-frontmost-app"])
             return 2
         }
 
         let monitor = FocusMonitor()
+        if title != nil || cwd != nil {
+            monitor.signalOverride = FocusMonitor.SignalOverride(title: title, cwd: cwd)
+        }
         monitor.attach(bid)
         // AX observers deliver asynchronously; a short spin lets the element
         // tree settle before we read it.
         RunLoop.current.run(until: Date().addingTimeInterval(0.2))
 
         var out = monitor.diagnosticSnapshot(bid: bid)
-        out["frontmost"] = bid
-        out["currentInputSource"] = currentInputSourceID() ?? "unknown"
+        out["frontmost"] = frontID ?? NSNull()
+        out["resolvedFor"] = bid
+        if bundleID != nil || title != nil || cwd != nil { out["replayed"] = true }
+        // Names come from the system, never assumed: which sources exist and
+        // which one is active are both up to the user's setup.
+        let available = listInputSources()
+        func label(_ id: String?) -> Any {
+            guard let id else { return NSNull() }
+            guard let name = available.first(where: { $0.id == id })?.name else { return id }
+            return "\(name) [\(id)]"
+        }
+        out["currentInputSource"] = label(currentInputSourceID())
+        out["resolvedInputSource"] = label(out["resolved"] as? String)
+        out["availableInputSources"] = available.map { "\($0.name) [\($0.id)]" }
         emit(out)
         return 0
     }
@@ -59,10 +76,6 @@ enum Diagnostics {
         }
         emit(out)
         return 0
-    }
-
-    private static func currentInputSourceID() -> String? {
-        listInputSources().first { $0.name == currentInputSourceName() }?.id
     }
 
     private static func emit(_ dict: [String: Any]) {

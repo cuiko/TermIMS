@@ -4,7 +4,13 @@ import Cocoa
 // exits. Kept ahead of NSApplication setup so the menu bar app never appears.
 let args = Array(CommandLine.arguments.dropFirst())
 if args.contains("diagnose") {
-    exit(Diagnostics.run())
+    // --title / --cwd replay an observed tab's signals against the live
+    // process table, so a tab can be checked without focusing it.
+    func value(_ flag: String) -> String? {
+        guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+        return args[i + 1]
+    }
+    exit(Diagnostics.run(bundleID: value("--bid"), title: value("--title"), cwd: value("--cwd")))
 }
 // `herdr-probe [cwd]` resolves which herdr session a tab with that cwd maps
 // to. Deliberately free of Accessibility calls so it runs from a plain build.
