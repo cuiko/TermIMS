@@ -155,7 +155,10 @@ class FocusMonitor {
             procs.contains { $0.caseInsensitiveCompare("herdr") == .orderedSame }
         }
         if candidates.count == 1, hasHerdr(candidates[0]) { return true }
-        if let title, title.caseInsensitiveCompare("herdr") == .orderedSame {
+        // Mention, not equality: a herdr tab's title may be `herdr`, the whole
+        // command line (`herdr session attach work`), or a pane title herdr
+        // appended itself to (`π - herdr`).
+        if let title, title.mentionsAny(of: ["herdr"]) {
             // Title says herdr; still require that we didn't confidently resolve
             // a *different* single tty (e.g. nvim) — that would mean the title
             // is stale or user-set and the process tree is more trustworthy.
@@ -486,67 +489,20 @@ class FocusMonitor {
             entries.filter { descendants.contains($0.pid) && $0.tdev == td }.map(resolved)
         }
 
-        if candidateTdevs.count == 1 {
-            return [ttyProcs(candidateTdevs[0])]
+        // Several tabs share this cwd. The window title is the only per-tab
+        // signal Ghostty gives us, so it decides which one has focus.
+        let surfaces = candidateTdevs.map { td in
+            SurfaceNarrowing.Surface(id: String(td),
+                                     foreground: fgByTty[td] ?? [],
+                                     all: ttyProcs(td))
         }
-
-        let title = getFocusedWindowTitle(bid: bid) ?? ""
-        // Shell prompt signal: title equals a bare shell name, or shows the
-        // focused tab's own cwd in any of the recognised forms.
-        let looksLikeShell = shellNames.contains(title) || title.showsCwd(tabCWD)
-
-        if looksLikeShell {
-            let tdev = candidateTdevs.first(where: { td in
-                (fgByTty[td] ?? []).allSatisfy { shellNames.contains($0) }
-            }) ?? candidateTdevs[0]
-            return [ttyProcs(tdev)]
+        let narrowed = SurfaceNarrowing.narrow(surfaces,
+                                               title: getFocusedWindowTitle(bid: bid) ?? "",
+                                               cwd: tabCWD)
+        if narrowed.count < surfaces.count {
+            Log.debug("CWD NARROWED: \(surfaces.count) → \(narrowed.map(\.id))")
         }
-
-        var nonShellTdevs = candidateTdevs.filter { td in
-            (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
-        }
-
-        // Sibling herdr host tab often shares $HOME with other Ghostty tabs.
-        // When the window title isn't "herdr", drop herdr-only ttys so they
-        // don't poison the "all candidates must agree" process-rule check
-        // (e.g. focused Pi tab + idle herdr both under /Users/… → miss).
-        if title.caseInsensitiveCompare("herdr") != .orderedSame {
-            nonShellTdevs = nonShellTdevs.filter { td in
-                let nonShell = ttyProcs(td).filter { !shellNames.contains($0) }
-                if nonShell.count == 1,
-                   nonShell[0].caseInsensitiveCompare("herdr") == .orderedSame {
-                    return false
-                }
-                return true
-            }
-        }
-
-        guard nonShellTdevs.count > 1 else {
-            return [ttyProcs(nonShellTdevs.first ?? candidateTdevs[0])]
-        }
-
-        // Multi non-shell candidates: try to single out the focused one by
-        // checking which candidate's fg process name appears in the window
-        // title. Works for terminals that auto-set the title to the running
-        // command (Ghostty, kitty, etc.) when several tabs share a cwd.
-        // Shell processes are excluded so a title like "Running zsh in foo"
-        // doesn't accidentally match every candidate (every tty has zsh).
-        for td in nonShellTdevs {
-            let procs = ttyProcs(td)
-            let nonShellOnly = procs.filter { !shellNames.contains($0) }
-            if title.mentionsAny(of: nonShellOnly) {
-                Log.debug("CWD MULTI title=\(title) → \(procs)")
-                return [procs]
-            }
-            // Exact title ↔ process name (Ghostty titles "Pi" while p_comm
-            // is `pi`). mentionsAny requires title ⊇ name; equality covers
-            // the short-name case in either direction.
-            if nonShellOnly.contains(where: { $0.caseInsensitiveCompare(title) == .orderedSame }) {
-                Log.debug("CWD MULTI title=\(title) exact → \(procs)")
-                return [procs]
-            }
-        }
-        return nonShellTdevs.map { ttyProcs($0) }
+        return narrowed.map(\.all)
     }
 
     // MARK: Event Handlers
