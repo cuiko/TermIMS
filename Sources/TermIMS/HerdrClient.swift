@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import TermIMSCore
 
 // herdr (https://github.com/ogulcancelik/herdr) is a tmux-style agent
 // multiplexer that runs *inside* a host terminal. All its panes share the
@@ -41,8 +42,8 @@ enum HerdrClient {
     }
 
     /// Authoritative view of herdr's focused pane, or nil when unreachable.
-    static func focusedPane() -> FocusedPane? {
-        guard let path = socketPath() else { return nil }
+    static func focusedPane(tabCwd: String?) -> FocusedPane? {
+        guard let path = socketPath(tabCwd: tabCwd) else { return nil }
 
         var paneID: String?
         var agent: String?
@@ -89,55 +90,58 @@ enum HerdrClient {
 
     // MARK: - Socket discovery
 
-    private static func socketPath() -> String? {
-        let fm = FileManager.default
+    private static var configBase: String {
         let env = ProcessInfo.processInfo.environment
-        let base: String
-        if let xdg = env["XDG_CONFIG_HOME"], !xdg.isEmpty {
-            base = xdg + "/herdr"
-        } else {
-            base = NSHomeDirectory() + "/.config/herdr"
-        }
+        if let xdg = env["XDG_CONFIG_HOME"], !xdg.isEmpty { return xdg + "/herdr" }
+        return NSHomeDirectory() + "/.config/herdr"
+    }
 
-        let defaultSocket = base + "/herdr.sock"
-        let sessionsDir = base + "/sessions"
+    private static func socketPath(forSession session: String?) -> String {
+        guard let session, !session.isEmpty else { return configBase + "/herdr.sock" }
+        return configBase + "/sessions/" + session + "/herdr.sock"
+    }
 
-        // Prefer the session a *running* herdr client was started with
-        // (`herdr --session name`). Otherwise a leftover default herdr.sock
-        // would win even when the focused terminal is on a named session.
-        let running = runningHerdrSessions()
-        if running.named.count == 1, !running.hasDefault,
-           fm.fileExists(atPath: sessionsDir + "/" + running.named[0] + "/herdr.sock") {
-            return sessionsDir + "/" + running.named[0] + "/herdr.sock"
+    /// Socket of the session hosted by the *focused* terminal tab.
+    ///
+    /// herdr runs one server per session and each tracks a single focused
+    /// pane, so asking the wrong session reports a pane the user is not
+    /// looking at. `tabCwd` is what the terminal reports for its focused tab;
+    /// a client inherits the cwd of the shell that launched it, which is what
+    /// tells the sessions apart. Returns nil when the client cannot be
+    /// identified, so the caller holds instead of guessing.
+    static func socketPath(tabCwd: String?) -> String? {
+        let fm = FileManager.default
+        let clients = runningClients()
+        if let client = HerdrSession.select(clients: clients, tabCwd: tabCwd) {
+            let path = socketPath(forSession: client.session)
+            if fm.fileExists(atPath: path) { return path }
         }
-        if running.hasDefault, fm.fileExists(atPath: defaultSocket) {
-            return defaultSocket
-        }
-        if fm.fileExists(atPath: defaultSocket) { return defaultSocket }
-
-        // No live signal — only fall back when exactly one named socket exists.
-        if let names = try? fm.contentsOfDirectory(atPath: sessionsDir), names.count == 1 {
-            let candidate = sessionsDir + "/" + names[0] + "/herdr.sock"
-            if fm.fileExists(atPath: candidate) { return candidate }
+        // No client resolved. A single socket on disk is still unambiguous;
+        // several are not.
+        if clients.isEmpty {
+            let defaultSocket = socketPath(forSession: nil)
+            let named = ((try? fm.contentsOfDirectory(atPath: configBase + "/sessions")) ?? [])
+                .map { socketPath(forSession: $0) }
+                .filter { fm.fileExists(atPath: $0) }
+            let all = (fm.fileExists(atPath: defaultSocket) ? [defaultSocket] : []) + named
+            if all.count == 1 { return all[0] }
         }
         return nil
     }
 
-    /// Session flags from live `herdr` processes: named `--session` values and
-    /// whether any client looks like the default (no `--session`).
-    private static func runningHerdrSessions() -> (named: [String], hasDefault: Bool) {
+    /// Live herdr *clients* — the in-terminal processes. The headless server
+    /// has no controlling tty and is skipped: it cannot say which session the
+    /// user is looking at.
+    static func runningClients() -> [HerdrSession.Client] {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL]
         var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else {
-            return ([], false)
-        }
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 0 else { return [] }
         let count = size / MemoryLayout<kinfo_proc>.stride
         var procs = [kinfo_proc](repeating: kinfo_proc(), count: count)
-        guard sysctl(&mib, 3, &procs, &size, nil, 0) == 0 else { return ([], false) }
+        guard sysctl(&mib, 3, &procs, &size, nil, 0) == 0 else { return [] }
         let actual = size / MemoryLayout<kinfo_proc>.stride
 
-        var named = Set<String>()
-        var hasDefault = false
+        var clients: [HerdrSession.Client] = []
         for i in 0..<actual {
             let kp = procs[i]
             let comm = withUnsafePointer(to: kp.kp_proc.p_comm) {
@@ -146,20 +150,28 @@ enum HerdrClient {
                 }
             }
             guard comm == "herdr" else { continue }
-            // Skip the headless server (no controlling tty); only the
-            // in-terminal client carries the session the user is looking at.
-            guard kp.kp_eproc.e_tdev != 0 else { continue }
-            guard let argv = processArgv(kp.kp_proc.p_pid) else { continue }
-            if let idx = argv.firstIndex(of: "--session"),
-               idx + 1 < argv.count,
-               !argv[idx + 1].isEmpty,
-               !argv[idx + 1].hasPrefix("-") {
-                named.insert(argv[idx + 1])
-            } else {
-                hasDefault = true
+            let pid = kp.kp_proc.p_pid
+            guard let argv = processArgv(pid) else { continue }
+            // A process with no controlling terminal reports NODEV (-1), not 0.
+            let tdev = kp.kp_eproc.e_tdev
+            let hasTty = tdev != 0 && tdev != -1
+            guard HerdrSession.isClient(argv: argv, hasControllingTty: hasTty) else { continue }
+            clients.append(HerdrSession.Client(pid: pid,
+                                               session: HerdrSession.name(fromArgv: argv),
+                                               cwd: processCWD(pid)))
+        }
+        return clients
+    }
+
+    private static func processCWD(_ pid: Int32) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size else { return nil }
+        return withUnsafePointer(to: info.pvi_cdir.vip_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
             }
         }
-        return (Array(named).sorted(), hasDefault)
     }
 
     private static func processArgv(_ pid: Int32) -> [String]? {

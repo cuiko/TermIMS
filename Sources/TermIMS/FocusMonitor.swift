@@ -96,8 +96,11 @@ class FocusMonitor {
         // the server stays up even when Ghostty is on a non-herdr tab.
         let hostTitle = getFocusedWindowTitle(bid: bid)
         let hostCandidates = getTerminalCandidateProcesses(bid: bid)
+        // The focused tab's cwd tells herdr sessions apart — without it we
+        // could report a pane from a session in some other tab.
+        let tabCwd = getFocusedTabInfo(bid: bid)?.cwd
         let herdrPane = hostLooksLikeHerdr(hostCandidates, title: hostTitle)
-            ? HerdrClient.focusedPane() : nil
+            ? HerdrClient.focusedPane(tabCwd: tabCwd) : nil
         let candidates = herdrPane.map { [$0.candidates] } ?? hostCandidates
         updateHerdrPolling(bid: bid, pane: herdrPane)
 
@@ -194,7 +197,7 @@ class FocusMonitor {
         // and call updateHerdrPolling(nil). Avoid a full process-table scan here.
         // A single RPC failure is treated as transient — stopping the timer
         // here would miss later herdr tab switches until some unrelated AX event.
-        guard let pane = HerdrClient.focusedPane() else { return }
+        guard let pane = HerdrClient.focusedPane(tabCwd: getFocusedTabInfo(bid: bid)?.cwd) else { return }
         let fp = pane.fingerprint
         guard fp != lastHerdrFingerprint else { return }
         Log.debug("HERDR FOCUS CHANGE: \(lastHerdrFingerprint ?? "nil") → \(fp)")
@@ -658,4 +661,42 @@ class FocusMonitor {
         elements.removeValue(forKey: bid)
         contexts.removeValue(forKey: bid)
     }
+
+    // MARK: Diagnostics
+
+    /// Every signal the terminal matcher consumes, as plain JSON-ready values.
+    /// Used by `TermIMS diagnose` so the resolution path can be inspected from
+    /// a shell rather than inferred from the debug log.
+    func diagnosticSnapshot(bid: String) -> [String: Any] {
+        var out: [String: Any] = ["bundleID": bid,
+                                  "isTerminal": terminalBundleIDs.contains(bid)]
+
+        let hostTitle = getFocusedWindowTitle(bid: bid)
+        out["hostTitle"] = hostTitle ?? NSNull()
+
+        let tabInfo = getFocusedTabInfo(bid: bid)
+        out["cwd"] = tabInfo?.cwd ?? NSNull()
+        out["osc7Tty"] = tabInfo?.tty.map { String($0) } ?? NSNull()
+
+        let hostCandidates = getTerminalCandidateProcesses(bid: bid)
+        out["hostCandidates"] = hostCandidates
+
+        let looksHerdr = hostLooksLikeHerdr(hostCandidates, title: hostTitle)
+        out["hostLooksLikeHerdr"] = looksHerdr
+        if looksHerdr, let pane = HerdrClient.focusedPane(tabCwd: tabInfo?.cwd) {
+            out["herdrPane"] = ["title": pane.title ?? NSNull(),
+                                "candidates": pane.candidates,
+                                "fingerprint": pane.fingerprint]
+        } else {
+            out["herdrPane"] = NSNull()
+        }
+
+        let store = RuleStore.shared
+        out["rules"] = store.terminalRules.filter(\.enabled).map {
+            ["type": $0.matchType.rawValue, "pattern": $0.pattern, "im": $0.inputSourceName]
+        }
+        out["resolved"] = resolveInputSource(for: bid) ?? NSNull()
+        return out
+    }
+
 }
