@@ -20,6 +20,10 @@ class FocusMonitor {
     private var herdrPoll: Timer?
     private var herdrPollBid: String?
     private var lastHerdrFingerprint: String?
+    /// The app the previous resolution was for. Arriving from somewhere else
+    /// and moving between tabs of the app you are already in call for
+    /// different answers when the focused surface cannot be identified.
+    private var lastResolvedBid: String?
     /// Replaces the Accessibility-derived signals for one resolution, so an
     /// observed tab can be replayed against the live process table without
     /// having to focus it. Set only by `diagnose --title/--cwd`.
@@ -68,10 +72,19 @@ class FocusMonitor {
 
     private func resolveInputSource(for bid: String) -> String? {
         let store = RuleStore.shared
+        let transition: SwitchPolicy.Transition =
+            bid == lastResolvedBid ? .withinApp : .enteringApp
+        lastResolvedBid = bid
+
         let result: (String?, String)
         if isTerminalWithRules(bid) {
-            if let matched = matchTerminalRule(bid: bid, store: store) {
-                result = (matched, "terminal-rule")
+            let action = SwitchPolicy.decide(matchTerminalRule(bid: bid, store: store),
+                                             transition: transition)
+            if case .use(let id) = action {
+                result = (id, "terminal-rule")
+            } else if case .hold = action {
+                Log.debug("MATCH RESULT bid=\(bid) HOLD — focused surface undecided, keeping current source")
+                return nil
             } else if let termDefault = store.terminalDefaultSourceID {
                 result = (termDefault, "terminal-default")
             } else if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
@@ -88,10 +101,10 @@ class FocusMonitor {
         return result.0
     }
 
-    private func matchTerminalRule(bid: String, store: RuleStore) -> String? {
+    private func matchTerminalRule(bid: String, store: RuleStore) -> SwitchPolicy.Outcome {
         Log.debug("MATCH START bid=\(bid)")
         let rules = store.terminalRules.filter(\.enabled)
-        guard !rules.isEmpty else { return nil }
+        guard !rules.isEmpty else { return .noRuleApplies }
 
         let titleRules = rules.filter { $0.matchType == .title }
         let processRules = rules.filter { $0.matchType == .process }
@@ -117,7 +130,7 @@ class FocusMonitor {
                 for rule in titleRules where !rule.pattern.isEmpty {
                     if title.matches(pattern: rule.pattern) {
                         Log.debug("TITLE RULE HIT: pattern=\(rule.pattern) title=\(title) via=\(herdrPane != nil ? "herdr" : "host")")
-                        return rule.inputSourceID
+                        return .matched(rule.inputSourceID)
                     }
                 }
             }
@@ -133,22 +146,25 @@ class FocusMonitor {
             // only when every candidate agrees — otherwise an idle tab
             // could get mis-switched just because a *different* tab in
             // the same cwd happens to be running `claude`.
-            let hits: [TerminalRule?] = candidates.map { procs in
+            let perSurface: [String?] = candidates.map { procs in
                 processRules.first(where: { rule in
                     !rule.pattern.isEmpty &&
                     procs.contains(where: { $0.matches(pattern: rule.pattern) })
-                })
+                })?.inputSourceID
             }
-            if let firstHit = hits.first ?? nil,
-               hits.allSatisfy({ $0?.inputSourceID == firstHit.inputSourceID }) {
-                Log.debug("PROCESS RULE HIT: pattern=\(firstHit.pattern) across \(hits.count) candidate(s)")
-                return firstHit.inputSourceID
+            let outcome = SwitchPolicy.combine(perSurface)
+            switch outcome {
+            case .matched(let id):
+                Log.debug("PROCESS RULE HIT: \(id) across \(candidates.count) candidate(s)")
+            case .noRuleApplies:
+                Log.debug("PROCESS RULE MISS: \(candidates.count) candidate(s) agree no rule applies")
+            case .undecided:
+                Log.debug("PROCESS RULE UNDECIDED: \(candidates.count) candidate(s) disagree → \(perSurface)")
             }
-            let hitCount = hits.compactMap { $0 }.count
-            Log.debug("PROCESS RULE MISS: \(candidates.count) candidate(s), \(hitCount) hit, ambiguous → fall through")
+            return outcome
         }
 
-        return nil
+        return .noRuleApplies
     }
 
     /// True when the host terminal's focused surface is the herdr client.
@@ -665,7 +681,16 @@ class FocusMonitor {
         out["rules"] = store.terminalRules.filter(\.enabled).map {
             ["type": $0.matchType.rawValue, "pattern": $0.pattern, "im": $0.inputSourceName]
         }
-        out["resolved"] = resolveInputSource(for: bid) ?? NSNull()
+        // Two resolutions: the first sees no prior app, so it is the
+        // "arriving from elsewhere" answer; the second sees the same app and
+        // is the "already inside, switching tabs" one — where an undecided
+        // surface holds instead of switching.
+        let onEntry = resolveInputSource(for: bid)
+        let within = resolveInputSource(for: bid)
+        out["resolved"] = (onEntry as Any?) ?? NSNull()
+        out["resolvedOnEntry"] = (onEntry as Any?) ?? NSNull()
+        out["resolvedWithin"] = (within as Any?) ?? NSNull()
+        out["holdsWithinApp"] = (within == nil && onEntry != nil)
         return out
     }
 

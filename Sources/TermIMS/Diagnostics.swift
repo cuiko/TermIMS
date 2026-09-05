@@ -45,6 +45,8 @@ enum Diagnostics {
         }
         out["currentInputSource"] = label(currentInputSourceID())
         out["resolvedInputSource"] = label(out["resolved"] as? String)
+        out["resolvedOnEntryName"] = label(out["resolvedOnEntry"] as? String)
+        out["resolvedWithinName"] = label(out["resolvedWithin"] as? String)
         out["availableInputSources"] = available.map { "\($0.name) [\($0.id)]" }
         emit(out)
         return 0
