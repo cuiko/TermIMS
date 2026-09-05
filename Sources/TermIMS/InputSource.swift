@@ -26,6 +26,15 @@ func listInputSources() -> [IMSource] {
     }
 }
 
+/// Identifier of the active keyboard input source. Read straight off the
+/// current source: resolving it by localized name breaks when two sources
+/// share a name, or when the active one is not among the selectable list.
+func currentInputSourceID() -> String? {
+    guard let cur = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
+          let ptr = TISGetInputSourceProperty(cur, kTISPropertyInputSourceID) else { return nil }
+    return Unmanaged<CFString>.fromOpaque(ptr).takeUnretainedValue() as String
+}
+
 func currentInputSourceName() -> String? {
     guard let cur = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue(),
           let ptr = TISGetInputSourceProperty(cur, kTISPropertyLocalizedName) else { return nil }
