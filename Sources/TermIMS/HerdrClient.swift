@@ -111,10 +111,31 @@ enum HerdrClient {
     /// identified, so the caller holds instead of guessing.
     static func socketPath(tabCwd: String?) -> String? {
         let fm = FileManager.default
-        let clients = runningClients()
-        if let client = HerdrSession.select(clients: clients, tabCwd: tabCwd) {
+        var clients = runningClients()
+
+        func resolve(_ candidates: [HerdrSession.Client]) -> String? {
+            guard let client = HerdrSession.select(clients: candidates, tabCwd: tabCwd) else { return nil }
             let path = socketPath(forSession: client.session)
-            if fm.fileExists(atPath: path) { return path }
+            return fm.fileExists(atPath: path) ? path : nil
+        }
+
+        // The launch cwd is already in hand — try it before paying for a
+        // socket round trip per session.
+        if let path = resolve(clients) { return path }
+
+        // Still undecided. Ask each session for its focused pane's cwd: herdr
+        // forwards that to the host terminal, so a tab hosting herdr usually
+        // reports the pane's directory rather than the client's launch one.
+        if clients.count > 1, let tabCwd, !tabCwd.isEmpty {
+            clients = clients.map { client in
+                let path = socketPath(forSession: client.session)
+                guard fm.fileExists(atPath: path) else { return client }
+                return HerdrSession.Client(pid: client.pid,
+                                           session: client.session,
+                                           cwd: client.cwd,
+                                           paneCwd: focusedPaneCwd(socketPath: path))
+            }
+            if let path = resolve(clients) { return path }
         }
         // No client resolved. A single socket on disk is still unambiguous;
         // several are not.
@@ -127,6 +148,19 @@ enum HerdrClient {
             if all.count == 1 { return all[0] }
         }
         return nil
+    }
+
+
+    /// Working directory of a session's focused pane. Used to tell sessions
+    /// apart when their launch directories cannot.
+    private static func focusedPaneCwd(socketPath path: String) -> String? {
+        guard let data = request(socketPath: path,
+                                 line: #"{"id":"termims-cwd","method":"pane.current","params":{}}"#),
+              let root = try? JSONSerialization.jsonObject(with: data),
+              (root as? [String: Any])?["error"] == nil else { return nil }
+        var cwds: [String] = []
+        collectStringValues(root, key: "cwd", into: &cwds)
+        return cwds.first
     }
 
     /// Live herdr *clients* — the in-terminal processes. The headless server

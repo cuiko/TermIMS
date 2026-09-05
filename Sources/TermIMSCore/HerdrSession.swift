@@ -17,12 +17,18 @@ public enum HerdrSession {
     public struct Client: Equatable {
         public let pid: Int32
         public let session: String?
+        /// Directory the client was launched from — it inherits the shell's cwd.
         public let cwd: String?
+        /// Working directory of the session's focused pane, as herdr reports
+        /// it. Filled in only when the launch cwd was not decisive, since
+        /// reading it costs a socket round trip per session.
+        public let paneCwd: String?
 
-        public init(pid: Int32, session: String?, cwd: String?) {
+        public init(pid: Int32, session: String?, cwd: String?, paneCwd: String? = nil) {
             self.pid = pid
             self.session = session
             self.cwd = cwd
+            self.paneCwd = paneCwd
         }
     }
 
@@ -62,16 +68,26 @@ public enum HerdrSession {
 
     /// The client the user is looking at, or nil when it cannot be told apart.
     ///
-    /// A single running client is unambiguous. Otherwise the focused tab's cwd
-    /// decides: a herdr client inherits the cwd of the shell that launched it,
-    /// which is what the terminal reports for that tab. If the cwd matches more
-    /// than one client — or none — this returns nil rather than guessing, so
-    /// the caller can hold the current input source instead of switching to a
-    /// pane the user is not looking at.
+    /// A single running client is unambiguous. Otherwise the working directory
+    /// the terminal reports for its focused tab decides, matched against two
+    /// candidates, because which one the terminal shows depends on herdr:
+    ///
+    ///   - the client's launch cwd, inherited from the shell that started it;
+    ///   - the focused pane's cwd, which herdr forwards to the host terminal —
+    ///     so a tab often reports the pane's directory, not the client's.
+    ///
+    /// The pane cwd is tried first: it tracks the current pane, while the
+    /// launch cwd is fixed at startup and can belong to a different session
+    /// entirely. If neither yields exactly one client this returns nil rather
+    /// than guessing, so the caller holds the current input source instead of
+    /// switching to a pane the user is not looking at.
     public static func select(clients: [Client], tabCwd: String?) -> Client? {
         if clients.count == 1 { return clients[0] }
         guard clients.count > 1, let tabCwd, !tabCwd.isEmpty else { return nil }
-        let matches = clients.filter { $0.cwd == tabCwd }
-        return matches.count == 1 ? matches[0] : nil
+        for key in [\Client.paneCwd, \Client.cwd] {
+            let matches = clients.filter { $0[keyPath: key] == tabCwd }
+            if matches.count == 1 { return matches[0] }
+        }
+        return nil
     }
 }
