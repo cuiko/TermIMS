@@ -66,9 +66,11 @@ public enum HerdrSession {
         return !argv.dropFirst().prefix(1).contains("server")
     }
 
-    /// The client the user is looking at, or nil when it cannot be told apart.
+    /// A client for the session the user is looking at, or nil when sessions
+    /// cannot be told apart. Clients attached to the same session share a
+    /// socket and focused pane, so any one of them represents that session.
     ///
-    /// A single running client is unambiguous. Otherwise the working directory
+    /// A single running session is unambiguous. Otherwise the working directory
     /// the terminal reports for its focused tab decides, matched against two
     /// candidates, because which one the terminal shows depends on herdr:
     ///
@@ -78,15 +80,23 @@ public enum HerdrSession {
     ///
     /// The pane cwd is tried first: it tracks the current pane, while the
     /// launch cwd is fixed at startup and can belong to a different session
-    /// entirely. If neither yields exactly one client this returns nil rather
+    /// entirely. If neither yields exactly one session this returns nil rather
     /// than guessing, so the caller holds the current input source instead of
     /// switching to a pane the user is not looking at.
     public static func select(clients: [Client], tabCwd: String?) -> Client? {
-        if clients.count == 1 { return clients[0] }
+        func uniqueSession(_ candidates: [Client]) -> Client? {
+            guard let first = candidates.first,
+                  candidates.allSatisfy({ ($0.session ?? "") == (first.session ?? "") }) else {
+                return nil
+            }
+            return first
+        }
+
+        if let client = uniqueSession(clients) { return client }
         guard clients.count > 1, let tabCwd, !tabCwd.isEmpty else { return nil }
         for key in [\Client.paneCwd, \Client.cwd] {
             let matches = clients.filter { $0[keyPath: key] == tabCwd }
-            if matches.count == 1 { return matches[0] }
+            if let client = uniqueSession(matches) { return client }
         }
         return nil
     }

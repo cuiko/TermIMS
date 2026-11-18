@@ -54,6 +54,53 @@ struct HerdrSessionTests {
         #expect(HerdrSession.select(clients: [Self.other], tabCwd: nil) == Self.other)
     }
 
+    @Test("clients attached to one session need no disambiguation", arguments: [
+        String?.none, "work",
+    ])
+    func sharedSession(session: String?) {
+        let a = HerdrSession.Client(pid: 1, session: session, cwd: "/Users/x")
+        let b = HerdrSession.Client(pid: 2, session: session, cwd: "/elsewhere")
+        // A pane can forward a cwd neither client was launched from.
+        for tabCwd in [String?.none, "/pane/project"] {
+            #expect(HerdrSession.select(clients: [a, b], tabCwd: tabCwd) == a)
+        }
+    }
+
+    @Test("nil and empty session names use the same default socket")
+    func defaultSessionSpellings() {
+        let a = HerdrSession.Client(pid: 1, session: nil, cwd: "/Users/x")
+        let b = HerdrSession.Client(pid: 2, session: "", cwd: "/Users/x")
+        #expect(HerdrSession.select(clients: [a, b], tabCwd: nil) == a)
+    }
+
+    @Test("cwd matches may name several clients in one session", arguments: [false, true])
+    func sharedSessionCwd(usePaneCwd: Bool) {
+        let a = HerdrSession.Client(pid: 1, session: nil,
+                                   cwd: usePaneCwd ? "/launch/a" : "/shared",
+                                   paneCwd: usePaneCwd ? "/shared" : nil)
+        let b = HerdrSession.Client(pid: 2, session: nil,
+                                   cwd: usePaneCwd ? "/launch/b" : "/shared",
+                                   paneCwd: usePaneCwd ? "/shared" : nil)
+        let other = HerdrSession.Client(pid: 3, session: "work", cwd: "/other")
+        #expect(HerdrSession.select(clients: [a, b, other], tabCwd: "/shared") == a)
+    }
+
+    @Test("every client's cwd remains available when sessions have multiple clients")
+    func duplicateSessionKeepsCwds() {
+        let a = HerdrSession.Client(pid: 1, session: nil, cwd: "/first")
+        let b = HerdrSession.Client(pid: 2, session: nil, cwd: "/second")
+        let other = HerdrSession.Client(pid: 3, session: "work", cwd: "/other")
+        #expect(HerdrSession.select(clients: [a, b, other], tabCwd: "/second") == b)
+    }
+
+    @Test("multiple clients do not resolve ambiguity between different sessions")
+    func sharedPaneCwdAcrossSessions() {
+        let a = HerdrSession.Client(pid: 1, session: nil, cwd: "/launch/a", paneCwd: "/shared")
+        let b = HerdrSession.Client(pid: 2, session: nil, cwd: "/launch/b", paneCwd: "/shared")
+        let other = HerdrSession.Client(pid: 3, session: "work", cwd: "/launch/c", paneCwd: "/shared")
+        #expect(HerdrSession.select(clients: [a, b, other], tabCwd: "/shared") == nil)
+    }
+
     @Test("the focused tab's cwd picks the client")
     func cwdPicksClient() {
         let clients = [Self.first, Self.other]

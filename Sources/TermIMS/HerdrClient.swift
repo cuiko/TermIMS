@@ -107,7 +107,8 @@ enum HerdrClient {
     /// pane, so asking the wrong session reports a pane the user is not
     /// looking at. `tabCwd` is what the terminal reports for its focused tab;
     /// a client inherits the cwd of the shell that launched it, which is what
-    /// tells the sessions apart. Returns nil when the client cannot be
+    /// tells the sessions apart. Several clients attached to the same session
+    /// still identify one socket. Returns nil when the session cannot be
     /// identified, so the caller holds instead of guessing.
     static func socketPath(tabCwd: String?) -> String? {
         let fm = FileManager.default
@@ -127,13 +128,25 @@ enum HerdrClient {
         // forwards that to the host terminal, so a tab hosting herdr usually
         // reports the pane's directory rather than the client's launch one.
         if clients.count > 1, let tabCwd, !tabCwd.isEmpty {
+            var probedSessions = Set<String>()
+            var paneCwdBySession: [String: String] = [:]
             clients = clients.map { client in
+                let sessionKey = client.session ?? ""
+                if let paneCwd = paneCwdBySession[sessionKey] {
+                    return HerdrSession.Client(pid: client.pid,
+                                               session: client.session,
+                                               cwd: client.cwd,
+                                               paneCwd: paneCwd)
+                }
+                guard probedSessions.insert(sessionKey).inserted else { return client }
                 let path = socketPath(forSession: client.session)
                 guard fm.fileExists(atPath: path) else { return client }
+                let paneCwd = focusedPaneCwd(socketPath: path)
+                if let paneCwd { paneCwdBySession[sessionKey] = paneCwd }
                 return HerdrSession.Client(pid: client.pid,
                                            session: client.session,
                                            cwd: client.cwd,
-                                           paneCwd: focusedPaneCwd(socketPath: path))
+                                           paneCwd: paneCwd)
             }
             if let path = resolve(clients) { return path }
         }
