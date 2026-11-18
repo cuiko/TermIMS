@@ -121,12 +121,13 @@ class FocusMonitor {
             ? HerdrClient.focusedPane(tabCwd: tabCwd) : nil
         let candidates = herdrPane.map { [$0.candidates] } ?? hostCandidates
         updateHerdrPolling(bid: bid, pane: herdrPane)
+        // Prefer herdr's per-pane title; the host window title is usually
+        // just "herdr" and would miss Claude-style glyph title rules.
+        let titleSignal = herdrPane?.title ?? hostTitle
+        let titleUnavailable = titleSignal?.isEmpty ?? true
 
         if !titleRules.isEmpty {
-            // Prefer herdr's per-pane title; the host window title is usually
-            // just "herdr" and would miss Claude-style glyph title rules.
-            let title = herdrPane?.title ?? hostTitle
-            if let title {
+            if let title = titleSignal {
                 for rule in titleRules where !rule.pattern.isEmpty {
                     if title.matches(pattern: rule.pattern) {
                         Log.debug("TITLE RULE HIT: pattern=\(rule.pattern) title=\(title) via=\(herdrPane != nil ? "herdr" : "host")")
@@ -152,19 +153,26 @@ class FocusMonitor {
                     procs.contains(where: { $0.matches(pattern: rule.pattern) })
                 })?.inputSourceID
             }
-            let outcome = SwitchPolicy.combine(perSurface)
+            let combined = SwitchPolicy.combine(perSurface)
+            // A process-rule miss does not prove that no title rule applies if
+            // the terminal did not expose any usable title. Preserve that
+            // uncertainty so the caller holds within the app.
+            let outcome: SwitchPolicy.Outcome =
+                combined == .noRuleApplies && !titleRules.isEmpty && titleUnavailable
+                    ? .undecided
+                    : combined
             switch outcome {
             case .matched(let id):
                 Log.debug("PROCESS RULE HIT: \(id) across \(candidates.count) candidate(s)")
             case .noRuleApplies:
                 Log.debug("PROCESS RULE MISS: \(candidates.count) candidate(s) agree no rule applies")
             case .undecided:
-                Log.debug("PROCESS RULE UNDECIDED: \(candidates.count) candidate(s) disagree → \(perSurface)")
+                Log.debug("PROCESS RULE UNDECIDED: \(candidates.count) candidate(s) disagree or title unavailable → \(perSurface)")
             }
             return outcome
         }
 
-        return .noRuleApplies
+        return !titleRules.isEmpty && titleUnavailable ? .undecided : .noRuleApplies
     }
 
     /// True when the host terminal's focused surface is the herdr client.
@@ -670,7 +678,7 @@ class FocusMonitor {
         let looksHerdr = hostLooksLikeHerdr(hostCandidates, title: hostTitle)
         out["hostLooksLikeHerdr"] = looksHerdr
         if looksHerdr, let pane = HerdrClient.focusedPane(tabCwd: tabInfo?.cwd) {
-            out["herdrPane"] = ["title": pane.title ?? NSNull(),
+            out["herdrPane"] = ["title": (pane.title as Any?) ?? NSNull(),
                                 "candidates": pane.candidates,
                                 "fingerprint": pane.fingerprint]
         } else {
