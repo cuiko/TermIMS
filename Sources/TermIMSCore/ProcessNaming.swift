@@ -42,10 +42,10 @@ public enum ProcessNaming {
     ]
 
     /// True when reading argv could improve on `comm` — either `comm` names a
-    /// generic runtime, or it is long enough to have been truncated. Lets the
-    /// caller avoid a sysctl for the overwhelming majority of processes.
+    /// generic runtime, looks like a version string, or is long enough to have
+    /// been truncated. Lets the caller avoid a sysctl for most processes.
     public static func needsArgv(comm: String) -> Bool {
-        isGenericRuntime(comm) || isTruncated(comm)
+        isGenericRuntime(comm) || isVersionLikeName(comm) || isTruncated(comm)
     }
 
     /// Best-effort real name for rule matching. `argv` is the process's
@@ -55,7 +55,8 @@ public enum ProcessNaming {
         let lower = comm.lowercased()
         let isRuntime = isGenericRuntime(comm)
         let truncated = isTruncated(comm)
-        guard isRuntime || truncated, let argv, !argv.isEmpty else { return comm }
+        let versionLike = isVersionLikeName(comm)
+        guard isRuntime || truncated || versionLike, let argv, !argv.isEmpty else { return comm }
 
         if isRuntime, let wrapped = wrappedScriptName(argv: argv) {
             return wrapped
@@ -73,6 +74,17 @@ public enum ProcessNaming {
                !genericRuntimes.contains(cl),
                !cl.hasPrefix("python") {
                 return cleaned
+            }
+        }
+
+        // Some native launchers expose their installed version as `comm` and
+        // rewrite argv[0] to the command name. Restore that name only when it
+        // is not itself version-shaped; paths ending in a version directory
+        // therefore leave the original `comm` untouched.
+        if versionLike, let argv0 = argv.first {
+            let base = (argv0 as NSString).lastPathComponent
+            if !base.isEmpty, !base.hasPrefix("-"), !isVersionLikeName(base) {
+                return base
             }
         }
 
@@ -162,6 +174,15 @@ public enum ProcessNaming {
     static func isGenericRuntime(_ comm: String) -> Bool {
         let lower = comm.lowercased()
         return genericRuntimes.contains(lower) || lower.hasPrefix("python")
+    }
+
+    /// Dotted numeric names are likely launcher versions rather than useful
+    /// process names (e.g. 2.1.303). Requiring two numeric components avoids
+    /// treating ordinary names such as `3d-renderer` as versions.
+    static func isVersionLikeName(_ name: String) -> Bool {
+        let components = name.split(separator: ".")
+        guard components.count >= 2 else { return false }
+        return components.prefix(2).allSatisfy { $0.allSatisfy(\.isNumber) }
     }
 
     /// A fully-populated `p_comm` means the real name was likely truncated.

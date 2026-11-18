@@ -15,13 +15,15 @@ struct ProcessNamingTests {
         #expect(ProcessNaming.needsArgv(comm: "zsh") == false)
         #expect(ProcessNaming.needsArgv(comm: "claude") == false)
         #expect(ProcessNaming.needsArgv(comm: "vim") == false)
+        #expect(ProcessNaming.needsArgv(comm: "3d-renderer") == false)
     }
 
-    @Test("runtimes and truncated names do trigger an argv read")
-    func runtimeOrTruncatedNeedsArgv() {
+    @Test("runtimes, version names, and truncated names trigger an argv read")
+    func runtimeVersionOrTruncatedNeedsArgv() {
         #expect(ProcessNaming.needsArgv(comm: "node"))
         #expect(ProcessNaming.needsArgv(comm: "Python"))
         #expect(ProcessNaming.needsArgv(comm: "python3.12"))
+        #expect(ProcessNaming.needsArgv(comm: "2.1.303"))
         // A fully populated p_comm (MAXCOMLEN - 1) means likely truncation.
         #expect(ProcessNaming.needsArgv(comm: String(repeating: "a", count: Int(MAXCOMLEN) - 1)))
     }
@@ -76,6 +78,23 @@ struct ProcessNamingTests {
         #expect(ProcessNaming.resolve(comm: comm, argv: argv) == comm)
     }
 
+    // MARK: version-named native processes
+
+    @Test("version-shaped comm resolves to a rewritten argv0 name", arguments: [
+        ["claude"],
+        ["/Users/x/.local/bin/claude"],
+    ])
+    func resolvesVersionNamedProcess(argv: [String]) {
+        #expect(ProcessNaming.resolve(comm: "2.1.303", argv: argv) == "claude")
+    }
+
+    @Test("version-shaped argv0 path keeps the original comm")
+    func versionArgv0KeepsComm() {
+        let comm = "2.1.303"
+        let argv = ["/Users/x/.local/share/claude/versions/2.1.303"]
+        #expect(ProcessNaming.resolve(comm: comm, argv: argv) == comm)
+    }
+
     // MARK: truncation repair
 
     @Test("truncated comm is de-truncated from argv0")
@@ -106,5 +125,8 @@ struct ProcessNamingTests {
     func nonRuntimeUntouched() {
         #expect(ProcessNaming.resolve(comm: "zsh", argv: ["-zsh"]) == "zsh")
         #expect(ProcessNaming.resolve(comm: "herdr", argv: ["herdr"]) == "herdr")
+        #expect(ProcessNaming.needsArgv(comm: "vim") == false)
+        #expect(ProcessNaming.resolve(comm: "vim", argv: ["claude"]) == "vim")
+        #expect(ProcessNaming.resolve(comm: "3d-renderer", argv: ["claude"]) == "3d-renderer")
     }
 }
