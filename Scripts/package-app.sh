@@ -12,6 +12,16 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 SOURCE_ICON="$ROOT_DIR/Resources/AppIcon.png"
+# Ad-hoc signatures have no stable identity: every rebuild changes the code
+# hash, so macOS treats the app as new and drops its Accessibility grant —
+# meaning re-authorising after each build. Signing with a real identity keeps
+# the designated requirement stable and the grant with it. Prefer an explicit
+# SIGN_IDENTITY, else the first local codesigning identity, else ad-hoc (CI has
+# no keychain identity and must still build).
+if [ -z "${SIGN_IDENTITY:-}" ]; then
+  SIGN_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/[0-9]+\)/ { print $2; exit }')
+fi
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 
 cd "$ROOT_DIR"

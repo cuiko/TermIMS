@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import TermIMSCore
 
 class AXContext {
     let bundleID: String
@@ -19,6 +20,15 @@ class FocusMonitor {
     private var herdrPoll: Timer?
     private var herdrPollBid: String?
     private var lastHerdrFingerprint: String?
+    /// The app the previous resolution was for. Arriving from somewhere else
+    /// and moving between tabs of the app you are already in call for
+    /// different answers when the focused surface cannot be identified.
+    private var lastResolvedBid: String?
+    /// Replaces the Accessibility-derived signals for one resolution, so an
+    /// observed tab can be replayed against the live process table without
+    /// having to focus it. Set only by `diagnose --title/--cwd`.
+    struct SignalOverride { let title: String?; let cwd: String? }
+    var signalOverride: SignalOverride?
 
     func start() {
         let nc = NSWorkspace.shared.notificationCenter
@@ -62,10 +72,19 @@ class FocusMonitor {
 
     private func resolveInputSource(for bid: String) -> String? {
         let store = RuleStore.shared
+        let transition: SwitchPolicy.Transition =
+            bid == lastResolvedBid ? .withinApp : .enteringApp
+        lastResolvedBid = bid
+
         let result: (String?, String)
         if isTerminalWithRules(bid) {
-            if let matched = matchTerminalRule(bid: bid, store: store) {
-                result = (matched, "terminal-rule")
+            let action = SwitchPolicy.decide(matchTerminalRule(bid: bid, store: store),
+                                             transition: transition)
+            if case .use(let id) = action {
+                result = (id, "terminal-rule")
+            } else if case .hold = action {
+                Log.debug("MATCH RESULT bid=\(bid) HOLD — focused surface undecided, keeping current source")
+                return nil
             } else if let termDefault = store.terminalDefaultSourceID {
                 result = (termDefault, "terminal-default")
             } else if let rule = store.rules.first(where: { $0.enabled && $0.appBundleID == bid }) {
@@ -82,10 +101,10 @@ class FocusMonitor {
         return result.0
     }
 
-    private func matchTerminalRule(bid: String, store: RuleStore) -> String? {
+    private func matchTerminalRule(bid: String, store: RuleStore) -> SwitchPolicy.Outcome {
         Log.debug("MATCH START bid=\(bid)")
         let rules = store.terminalRules.filter(\.enabled)
-        guard !rules.isEmpty else { return nil }
+        guard !rules.isEmpty else { return .noRuleApplies }
 
         let titleRules = rules.filter { $0.matchType == .title }
         let processRules = rules.filter { $0.matchType == .process }
@@ -95,20 +114,24 @@ class FocusMonitor {
         // the server stays up even when Ghostty is on a non-herdr tab.
         let hostTitle = getFocusedWindowTitle(bid: bid)
         let hostCandidates = getTerminalCandidateProcesses(bid: bid)
+        // The focused tab's cwd tells herdr sessions apart — without it we
+        // could report a pane from a session in some other tab.
+        let tabCwd = getFocusedTabInfo(bid: bid)?.cwd
         let herdrPane = hostLooksLikeHerdr(hostCandidates, title: hostTitle)
-            ? HerdrClient.focusedPane() : nil
+            ? HerdrClient.focusedPane(tabCwd: tabCwd) : nil
         let candidates = herdrPane.map { [$0.candidates] } ?? hostCandidates
         updateHerdrPolling(bid: bid, pane: herdrPane)
+        // Prefer herdr's per-pane title; the host window title is usually
+        // just "herdr" and would miss Claude-style glyph title rules.
+        let titleSignal = herdrPane?.title ?? hostTitle
+        let titleUnavailable = titleSignal?.isEmpty ?? true
 
         if !titleRules.isEmpty {
-            // Prefer herdr's per-pane title; the host window title is usually
-            // just "herdr" and would miss Claude-style glyph title rules.
-            let title = herdrPane?.title ?? hostTitle
-            if let title {
+            if let title = titleSignal {
                 for rule in titleRules where !rule.pattern.isEmpty {
                     if title.matches(pattern: rule.pattern) {
                         Log.debug("TITLE RULE HIT: pattern=\(rule.pattern) title=\(title) via=\(herdrPane != nil ? "herdr" : "host")")
-                        return rule.inputSourceID
+                        return .matched(rule.inputSourceID)
                     }
                 }
             }
@@ -124,22 +147,32 @@ class FocusMonitor {
             // only when every candidate agrees — otherwise an idle tab
             // could get mis-switched just because a *different* tab in
             // the same cwd happens to be running `claude`.
-            let hits: [TerminalRule?] = candidates.map { procs in
+            let perSurface: [String?] = candidates.map { procs in
                 processRules.first(where: { rule in
                     !rule.pattern.isEmpty &&
                     procs.contains(where: { $0.matches(pattern: rule.pattern) })
-                })
+                })?.inputSourceID
             }
-            if let firstHit = hits.first ?? nil,
-               hits.allSatisfy({ $0?.inputSourceID == firstHit.inputSourceID }) {
-                Log.debug("PROCESS RULE HIT: pattern=\(firstHit.pattern) across \(hits.count) candidate(s)")
-                return firstHit.inputSourceID
+            let combined = SwitchPolicy.combine(perSurface)
+            // A process-rule miss does not prove that no title rule applies if
+            // the terminal did not expose any usable title. Preserve that
+            // uncertainty so the caller holds within the app.
+            let outcome: SwitchPolicy.Outcome =
+                combined == .noRuleApplies && !titleRules.isEmpty && titleUnavailable
+                    ? .undecided
+                    : combined
+            switch outcome {
+            case .matched(let id):
+                Log.debug("PROCESS RULE HIT: \(id) across \(candidates.count) candidate(s)")
+            case .noRuleApplies:
+                Log.debug("PROCESS RULE MISS: \(candidates.count) candidate(s) agree no rule applies")
+            case .undecided:
+                Log.debug("PROCESS RULE UNDECIDED: \(candidates.count) candidate(s) disagree or title unavailable → \(perSurface)")
             }
-            let hitCount = hits.compactMap { $0 }.count
-            Log.debug("PROCESS RULE MISS: \(candidates.count) candidate(s), \(hitCount) hit, ambiguous → fall through")
+            return outcome
         }
 
-        return nil
+        return !titleRules.isEmpty && titleUnavailable ? .undecided : .noRuleApplies
     }
 
     /// True when the host terminal's focused surface is the herdr client.
@@ -151,7 +184,10 @@ class FocusMonitor {
             procs.contains { $0.caseInsensitiveCompare("herdr") == .orderedSame }
         }
         if candidates.count == 1, hasHerdr(candidates[0]) { return true }
-        if let title, title.caseInsensitiveCompare("herdr") == .orderedSame {
+        // Mention, not equality: a herdr tab's title may be `herdr`, the whole
+        // command line (`herdr session attach work`), or a pane title herdr
+        // appended itself to (`π - herdr`).
+        if let title, title.mentionsAny(of: ["herdr"]) {
             // Title says herdr; still require that we didn't confidently resolve
             // a *different* single tty (e.g. nvim) — that would mean the title
             // is stale or user-set and the process tree is more trustworthy.
@@ -193,7 +229,7 @@ class FocusMonitor {
         // and call updateHerdrPolling(nil). Avoid a full process-table scan here.
         // A single RPC failure is treated as transient — stopping the timer
         // here would miss later herdr tab switches until some unrelated AX event.
-        guard let pane = HerdrClient.focusedPane() else { return }
+        guard let pane = HerdrClient.focusedPane(tabCwd: getFocusedTabInfo(bid: bid)?.cwd) else { return }
         let fp = pane.fingerprint
         guard fp != lastHerdrFingerprint else { return }
         Log.debug("HERDR FOCUS CHANGE: \(lastHerdrFingerprint ?? "nil") → \(fp)")
@@ -213,13 +249,21 @@ class FocusMonitor {
     }
 
     private func getFocusedWindowTitle(bid: String) -> String? {
+        if let signalOverride { return signalOverride.title }
         guard let app = elements[bid] else { return nil }
         return TerminalAdapters.adapter(for: bid).focusedTitle(appElement: app)
     }
 
-    private struct TabInfo { let cwd: String; let tty: dev_t? }
+    /// `cwd` is resolved for comparing against process working directories;
+    /// `reported` keeps the terminal's own spelling, which is what its window
+    /// title would show.
+    private struct TabInfo { let cwd: String; let reported: String; let tty: dev_t? }
 
     private func getFocusedTabInfo(bid: String) -> TabInfo? {
+        if let signalOverride {
+            guard let cwd = signalOverride.cwd else { return nil }
+            return TabInfo(cwd: CanonicalPath.of(cwd), reported: cwd, tty: nil)
+        }
         guard let win = getFocusedWindow(bid: bid) else { return nil }
         var val: AnyObject?
         guard AXUIElementCopyAttributeValue(win, kAXDocumentAttribute as CFString, &val) == .success,
@@ -231,7 +275,7 @@ class FocusMonitor {
         let tty = URLComponents(string: urlStr)?.queryItems?
             .first(where: { $0.name == "tty" })?.value
             .flatMap { Self.ttyDev(forName: $0) }
-        return TabInfo(cwd: path, tty: tty)
+        return TabInfo(cwd: CanonicalPath.of(path), reported: path, tty: tty)
     }
 
     /// Look up `/dev/<name>`'s rdev so we can compare against `kinfo_proc.e_tdev`.
@@ -250,11 +294,12 @@ class FocusMonitor {
         let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
         let ret = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &pathInfo, size)
         guard ret == size else { return nil }
-        return withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) { ptr in
+        let raw = withUnsafePointer(to: pathInfo.pvi_cdir.vip_path) { ptr in
             ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
                 String(cString: $0)
             }
         }
+        return CanonicalPath.of(raw)
     }
 
     private func procName(from kp: kinfo_proc) -> String {
@@ -265,140 +310,14 @@ class FocusMonitor {
         }
     }
 
-    // Runtimes that launch an agent as a script argument (e.g. `node
-    // .../claude`, `Python .../aider`). For these the kernel `p_comm` names
-    // the interpreter, not the tool the user wrote a rule for, so we recover
-    // the wrapped script's name from argv instead.
-    private static let genericRuntimes: Set<String> = ["node", "bun", "deno", "python", "python3"]
-    // Argv flags that mean "no script file follows" (inline eval / module),
-    // so there is no basename worth extracting.
-    private static let runtimeEvalFlags: Set<String> = ["-e", "--eval", "-p", "--print", "-c", "-m"]
-    // Runtime flags that consume the following argv token as their value —
-    // skipped so the value isn't mistaken for the script path.
-    private static let runtimeValueFlags: Set<String> = [
-        "-r", "--require", "--loader", "--import", "--experimental-loader", "--conditions",
-    ]
-    // Launcher subcommands that precede the real script (`bun run …`,
-    // `deno run …`). Must not be treated as the script path themselves.
-    private static let runtimeLauncherSubcommands: Set<String> = ["run"]
-
-    /// Best-effort "real" process name for rule matching. Kernel `p_comm` is
-    /// capped at `MAXCOMLEN` chars and, for agents launched through a runtime,
-    /// only names the runtime (`node`, `python`, …). This recovers the wrapped
-    /// script's basename and un-truncates long native names — so a user rule
-    /// like `claude` still matches `node .../claude`. Falls back to `comm`.
-    /// Reads argv (one sysctl) only when there is something to gain.
+    /// Best-effort "real" process name for rule matching. Naming rules live in
+    /// `ProcessNaming` (pure, unit-tested); this wrapper owns the one piece of
+    /// I/O they need — reading argv, and only when there is something to gain.
     private func resolvedProcName(pid: Int32, comm: String) -> String {
-        let lower = comm.lowercased()
-        let isRuntime = Self.genericRuntimes.contains(lower) || lower.hasPrefix("python")
-        // A fully-populated p_comm means the real name was likely truncated.
-        let truncated = comm.utf8.count >= Int(MAXCOMLEN) - 1
-        guard isRuntime || truncated, let argv = processArgv(pid) else { return comm }
-
-        if isRuntime, let wrapped = wrappedScriptName(argv: argv) {
-            return wrapped
-        }
-        // Node.js `process.title = "pi"` (and similar) rewrites argv[0] so
-        // `ps -o comm` shows `pi`, while kinfo `p_comm` stays `node`. When
-        // there's no script path in argv — just `["pi"]` — treat argv0 as
-        // the real name for rule matching.
-        if isRuntime, let argv0 = argv.first {
-            let base = (argv0 as NSString).lastPathComponent
-            let cleaned = base.hasPrefix("-") ? String(base.dropFirst()) : base
-            let cl = cleaned.lowercased()
-            if !cleaned.isEmpty,
-               !Self.genericRuntimes.contains(cl),
-               !cl.hasPrefix("python") {
-                return cleaned
-            }
-        }
-        // De-truncate a native binary via argv[0]. Guard with a prefix check so
-        // a login shell's `-zsh` argv[0] never replaces a clean `comm`.
-        if truncated, let argv0 = argv.first {
-            let base = (argv0 as NSString).lastPathComponent
-            if base.lowercased().hasPrefix(lower), base.utf8.count > comm.utf8.count {
-                return base
-            }
-        }
-        return comm
+        guard ProcessNaming.needsArgv(comm: comm) else { return comm }
+        return ProcessNaming.resolve(comm: comm, argv: processArgv(pid))
     }
 
-    /// Extract the wrapped script's name from a runtime's argv (skipping flags),
-    /// e.g. `["node", "-r", "x", "/opt/claude", …]` → `claude`,
-    /// `["bun", "run", "claude", …]` → `claude`. Returns nil for inline-eval /
-    /// module invocations that name no script file.
-    private func wrappedScriptName(argv: [String]) -> String? {
-        var i = 1
-        while i < argv.count {
-            let arg = argv[i]
-            if arg == "--" {
-                return i + 1 < argv.count ? scriptBasename(argv[i + 1]) : nil
-            }
-            if Self.runtimeEvalFlags.contains(arg) { return nil }
-            if Self.runtimeLauncherSubcommands.contains(arg) {
-                i += 1
-                continue
-            }
-            if arg.hasPrefix("-") {
-                if Self.runtimeValueFlags.contains(arg) { i += 1 }
-                i += 1
-                continue
-            }
-            return scriptBasename(arg)
-        }
-        return nil
-    }
-
-    // Generic entrypoint basenames that hide the real tool — climb to the
-    // package directory instead (e.g. `…/pi-coding-agent/dist/cli.js` →
-    // `pi-coding-agent`, which still substring-matches a `pi` process rule).
-    private static let genericScriptNames: Set<String> = [
-        "cli", "index", "main", "bin", "app", "run", "start", "bundle",
-    ]
-
-    /// Basename of a script path with a common script extension stripped, so
-    /// `.../gemini.js` reads as `gemini`. npm bin symlinks are extensionless
-    /// and already yield the tool name directly. Generic entrypoints climb
-    /// one packaging directory (`dist`/`bin`/…) so `dist/cli.js` maps to the
-    /// package folder. If that folder looks like a version/build id (e.g.
-    /// `2026.07.23-e383d2b`), return nil so the caller can fall through to
-    /// argv0 — many tools set argv0/`process.title` to the real command name.
-    private func scriptBasename(_ token: String) -> String? {
-        let ns = token as NSString
-        let base = ns.lastPathComponent
-        guard !base.isEmpty else { return nil }
-        let lower = base.lowercased()
-        var stripped = base
-        for ext in [".js", ".mjs", ".cjs", ".ts", ".py"] where lower.hasSuffix(ext) {
-            stripped = String(base.dropLast(ext.count))
-            break
-        }
-        guard Self.genericScriptNames.contains(stripped.lowercased()) else {
-            return stripped
-        }
-        // …/pkg/dist/cli.js → pkg
-        var dir = ns.deletingLastPathComponent
-        let leaf = (dir as NSString).lastPathComponent.lowercased()
-        if ["dist", "bin", "build", "lib", "src"].contains(leaf) {
-            dir = (dir as NSString).deletingLastPathComponent
-        }
-        let pkg = (dir as NSString).lastPathComponent
-        if pkg.isEmpty || pkg == "node_modules" || pkg.hasPrefix("@") { return nil }
-        // Version/build directories are not tool names — refuse so argv0 wins.
-        if Self.looksLikeVersionDir(pkg) { return nil }
-        return pkg
-    }
-
-    /// True for directory names that are build ids / versions, not packages
-    /// (`2026.07.23-e383d2b`, long hex hashes).
-    private static func looksLikeVersionDir(_ name: String) -> Bool {
-        if name.count >= 7, name.allSatisfy(\.isHexDigit) { return true }
-        if name.first?.isNumber == true,
-           name.contains(where: { $0 == "." || $0 == "-" }) {
-            return true
-        }
-        return false
-    }
 
     /// Read a process's argument vector via `KERN_PROCARGS2`. Returns nil when
     /// the process is gone or owned by another user (foreign argv is
@@ -551,7 +470,7 @@ class FocusMonitor {
                 //    running a foreground command. Gate on `~`/`/` prefix
                 //    so titles like "bwg-us:~" (ssh tab) don't false-match.
                 if rawTitle.hasPrefix("~") || rawTitle.hasPrefix("/") {
-                    let expanded = (rawTitle as NSString).expandingTildeInPath
+                    let expanded = CanonicalPath.of((rawTitle as NSString).expandingTildeInPath)
                     var matches: [(dev_t, [String])] = []
                     for (tdev, procs) in byTty {
                         guard let pid = shellPidPerTty[tdev],
@@ -608,67 +527,20 @@ class FocusMonitor {
             entries.filter { descendants.contains($0.pid) && $0.tdev == td }.map(resolved)
         }
 
-        if candidateTdevs.count == 1 {
-            return [ttyProcs(candidateTdevs[0])]
+        // Several tabs share this cwd. The window title is the only per-tab
+        // signal Ghostty gives us, so it decides which one has focus.
+        let surfaces = candidateTdevs.map { td in
+            SurfaceNarrowing.Surface(id: String(td),
+                                     foreground: fgByTty[td] ?? [],
+                                     all: ttyProcs(td))
         }
-
-        let title = getFocusedWindowTitle(bid: bid) ?? ""
-        // Shell prompt signal: title equals a bare shell name, or shows the
-        // focused tab's own cwd in any of the recognised forms.
-        let looksLikeShell = shellNames.contains(title) || title.showsCwd(tabCWD)
-
-        if looksLikeShell {
-            let tdev = candidateTdevs.first(where: { td in
-                (fgByTty[td] ?? []).allSatisfy { shellNames.contains($0) }
-            }) ?? candidateTdevs[0]
-            return [ttyProcs(tdev)]
+        let narrowed = SurfaceNarrowing.narrow(surfaces,
+                                               title: getFocusedWindowTitle(bid: bid) ?? "",
+                                               cwd: tabInfo?.reported ?? tabCWD)
+        if narrowed.count < surfaces.count {
+            Log.debug("CWD NARROWED: \(surfaces.count) → \(narrowed.map(\.id))")
         }
-
-        var nonShellTdevs = candidateTdevs.filter { td in
-            (fgByTty[td] ?? []).contains(where: { !shellNames.contains($0) })
-        }
-
-        // Sibling herdr host tab often shares $HOME with other Ghostty tabs.
-        // When the window title isn't "herdr", drop herdr-only ttys so they
-        // don't poison the "all candidates must agree" process-rule check
-        // (e.g. focused Pi tab + idle herdr both under /Users/… → miss).
-        if title.caseInsensitiveCompare("herdr") != .orderedSame {
-            nonShellTdevs = nonShellTdevs.filter { td in
-                let nonShell = ttyProcs(td).filter { !shellNames.contains($0) }
-                if nonShell.count == 1,
-                   nonShell[0].caseInsensitiveCompare("herdr") == .orderedSame {
-                    return false
-                }
-                return true
-            }
-        }
-
-        guard nonShellTdevs.count > 1 else {
-            return [ttyProcs(nonShellTdevs.first ?? candidateTdevs[0])]
-        }
-
-        // Multi non-shell candidates: try to single out the focused one by
-        // checking which candidate's fg process name appears in the window
-        // title. Works for terminals that auto-set the title to the running
-        // command (Ghostty, kitty, etc.) when several tabs share a cwd.
-        // Shell processes are excluded so a title like "Running zsh in foo"
-        // doesn't accidentally match every candidate (every tty has zsh).
-        for td in nonShellTdevs {
-            let procs = ttyProcs(td)
-            let nonShellOnly = procs.filter { !shellNames.contains($0) }
-            if title.mentionsAny(of: nonShellOnly) {
-                Log.debug("CWD MULTI title=\(title) → \(procs)")
-                return [procs]
-            }
-            // Exact title ↔ process name (Ghostty titles "Pi" while p_comm
-            // is `pi`). mentionsAny requires title ⊇ name; equality covers
-            // the short-name case in either direction.
-            if nonShellOnly.contains(where: { $0.caseInsensitiveCompare(title) == .orderedSame }) {
-                Log.debug("CWD MULTI title=\(title) exact → \(procs)")
-                return [procs]
-            }
-        }
-        return nonShellTdevs.map { ttyProcs($0) }
+        return narrowed.map(\.all)
     }
 
     // MARK: Event Handlers
@@ -783,4 +655,51 @@ class FocusMonitor {
         elements.removeValue(forKey: bid)
         contexts.removeValue(forKey: bid)
     }
+
+    // MARK: Diagnostics
+
+    /// Every signal the terminal matcher consumes, as plain JSON-ready values.
+    /// Used by `TermIMS diagnose` so the resolution path can be inspected from
+    /// a shell rather than inferred from the debug log.
+    func diagnosticSnapshot(bid: String) -> [String: Any] {
+        var out: [String: Any] = ["bundleID": bid,
+                                  "isTerminal": terminalBundleIDs.contains(bid)]
+
+        let hostTitle = getFocusedWindowTitle(bid: bid)
+        out["hostTitle"] = hostTitle ?? NSNull()
+
+        let tabInfo = getFocusedTabInfo(bid: bid)
+        out["cwd"] = tabInfo?.cwd ?? NSNull()
+        out["osc7Tty"] = tabInfo?.tty.map { String($0) } ?? NSNull()
+
+        let hostCandidates = getTerminalCandidateProcesses(bid: bid)
+        out["hostCandidates"] = hostCandidates
+
+        let looksHerdr = hostLooksLikeHerdr(hostCandidates, title: hostTitle)
+        out["hostLooksLikeHerdr"] = looksHerdr
+        if looksHerdr, let pane = HerdrClient.focusedPane(tabCwd: tabInfo?.cwd) {
+            out["herdrPane"] = ["title": (pane.title as Any?) ?? NSNull(),
+                                "candidates": pane.candidates,
+                                "fingerprint": pane.fingerprint]
+        } else {
+            out["herdrPane"] = NSNull()
+        }
+
+        let store = RuleStore.shared
+        out["rules"] = store.terminalRules.filter(\.enabled).map {
+            ["type": $0.matchType.rawValue, "pattern": $0.pattern, "im": $0.inputSourceName]
+        }
+        // Two resolutions: the first sees no prior app, so it is the
+        // "arriving from elsewhere" answer; the second sees the same app and
+        // is the "already inside, switching tabs" one — where an undecided
+        // surface holds instead of switching.
+        let onEntry = resolveInputSource(for: bid)
+        let within = resolveInputSource(for: bid)
+        out["resolved"] = (onEntry as Any?) ?? NSNull()
+        out["resolvedOnEntry"] = (onEntry as Any?) ?? NSNull()
+        out["resolvedWithin"] = (within as Any?) ?? NSNull()
+        out["holdsWithinApp"] = (within == nil && onEntry != nil)
+        return out
+    }
+
 }
