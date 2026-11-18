@@ -4,15 +4,23 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
 
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Show toolchain
         run: swift --version
       - name: Build DMG
@@ -20,8 +28,10 @@ jobs:
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          gh release create "${RELEASE_TAG}" \
             dist/TermIMS.dmg \
-            --title "${GITHUB_REF_NAME}" \
+            --title "${RELEASE_TAG}" \
+            --verify-tag \
             --generate-notes
