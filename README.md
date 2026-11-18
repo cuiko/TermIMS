@@ -50,7 +50,7 @@ set -g set-titles-string "#{pane_current_command}"
 
 TermIMS detects a herdr host tab (its tty runs `herdr`, or the window title mentions it — `herdr`, `herdr session attach work`, `π - herdr` all count) and asks herdr's local socket instead, matching rules against the focused pane's agent label, foreground process names, and pane title.
 
-herdr runs one server per session, each with its own socket and its own single focused pane, so with several sessions open the right one has to be picked first. TermIMS matches the directory the terminal reports for the focused tab against each running client — against the client's focused pane directory, which herdr forwards to the host terminal, and against the directory the client was launched from. If that names exactly one client, its session answers; if it does not, TermIMS holds rather than report a pane from a session you are not looking at.
+herdr runs one server per session, each with its own socket and its own single focused pane, so with several sessions open the right one has to be picked first. Multiple clients attached to the same session share that socket and focus, so they count as one session. TermIMS matches the directory the terminal reports for the focused tab against each running client — against the client's focused pane directory, which herdr forwards to the host terminal, and against the directory the client was launched from. If that names exactly one session, it answers; if it does not, TermIMS holds rather than report a pane from a session you are not looking at.
 
 Switching panes inside herdr produces no macOS focus event — it is one window redrawing — so while a herdr pane is focused TermIMS polls the socket a few times a second and re-resolves when the pane changes.
 
@@ -115,7 +115,7 @@ Claude Code rewrites the terminal title while it works, using more than one spin
 
 Process Name rules match the kernel-reported executable (`kp_proc.p_comm`), not the typed command. Many wrappers (`mole`, `cargo`, `bundle`, `mise`, `asdf`, …) `exec` into a different binary, so `mole analyze` shows up as `analyze-go`. Match the underlying binary, or use a Tab Title rule (shell `preexec` hooks usually put the typed command in the title).
 
-For Node / Bun / Deno (and similar), TermIMS also peels the script basename out of argv when the runtime itself is the foreground process, and respects a rewritten argv0 / `process.title` (e.g. `pi`) when there is no script path. Generic entrypoints like `cli` / `index` under `dist` / `bin` climb one more path segment; version-like directories are skipped so argv0 can win.
+For Node / Bun / Deno (and similar), TermIMS also peels the script basename out of argv when the runtime itself is the foreground process, and respects a rewritten argv0 / `process.title` (e.g. `pi`) when there is no script path. Generic entrypoints like `cli` / `index` under `dist` / `bin` climb one more path segment; version-like directories are skipped so argv0 can win. Native executables installed under a version number (e.g. `2.1.303`) also use argv0 to recover the command name when it has been rewritten.
 
 ## Troubleshooting
 
